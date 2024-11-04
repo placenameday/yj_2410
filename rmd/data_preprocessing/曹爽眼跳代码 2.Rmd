@@ -2,7 +2,9 @@
 title: "眼跳代码"
 author: "Caoshuang"
 date: "2024-10-20"
-output: html_document
+output:
+  html_document: default
+  pdf_document: default
 ---
 
 # 代码作者：曹爽，如有问题请联系13279330193。
@@ -17,7 +19,7 @@ library(tidyverse)
 
 
 眼跳的转换算法
-```{r 眼跳处理}
+```{r 处理方法}
 raw_data_path <- "data/demo/00a17d6c125942fcadcdf62eeec74ae2_295量表.csv"
 wideth <- 1920
 height <- 1080
@@ -80,7 +82,7 @@ data <- data %>%
 
 
 将上述算法打包成函数，可以看到，只输出了 3 个参数，分别是原始数据路径、屏幕宽度和屏幕高度。
-```{r 眼跳处理}
+```{r 方法打包}
 # 打包函数，去掉开头的参数，剩下的直接复制粘贴缩进即可
 calculate_saccade <- function(raw_data_path, wideth, height) {
     # 读取数据、重命名列名并转换指定列为数值型
@@ -142,30 +144,8 @@ calculate_saccade <- function(raw_data_path, wideth, height) {
 }
 ```
 
-接着尝试对一个目录下的所有文件批量处理，首先需要定义一个批量处理方法。
-```{r 批量处理}
-# 目录文件路径
-dir_path <- "data/demo"
-
-# 获取目录下所有文件路径
-file_paths <- list.files(dir_path, full.names = TRUE, recursive = FALSE)
-
-# 建立一个子目录，用于保存处理后的数据
-dir.create(file.path(dir_path, "saccades"), showWarnings = FALSE)
-
-# 使用tidyverse的map函数对所有文件进行批量处理
-map(file_paths, ~ {
-    # 生成保存路径
-    save_path <- file.path(dir_path, "saccades", paste0(basename(.x), "_saccades.csv"))
-    # 调用 calculate_saccade 函数处理数据
-    data <- calculate_saccade(.x, 1920, 1080)
-    # 保存处理后的数据
-    write_csv(data, save_path)
-})
-```
-
 为了简洁清晰，我们同样可以对批量处理的代码进行封装，生成一个批量处理的函数。
-```{r 批量处理}
+```{r 批量处理打包}
 # 打包函数，去掉开头的参数，剩下的直接复制粘贴缩进即可
 batch_process_saccade <- function(dir_path, wideth, height) {
     # 获取目录下所有文件路径
@@ -187,7 +167,7 @@ batch_process_saccade <- function(dir_path, wideth, height) {
 ```
 
 这样，实际使用时，只需要调用 `batch_process_saccade` 函数即可完成批量处理。
-```{r 批量处理}
+```{r 运行}
 target_dir <- "data/demo"
 
 batch_process_saccade(target_dir, 1920, 1080)
