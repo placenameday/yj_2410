@@ -1,0 +1,67 @@
+---
+title: "眼跳代码"
+author: "Caoshuang"
+date: "2024-10-20"
+output: html_document
+#代码作者：曹爽，如有问题请联系13279330193。
+#特别鸣谢：多质课题组眼动数据分析团队成员
+#          邢辰，指导老师，提供技术指导。
+#          张亚娟，组织协调，提供数据支持。
+#          陈斯妤，协作讨论，提供技术支持。
+---
+```{r 眼跳处理}
+
+library(tidyverse)  
+  
+data <- read.csv("data/demo/00a17d6c125942fcadcdf62eeec74ae2_295量表.csv", skip = 1 ) 
+
+ colnames(data) <- c("Id", "QuestionsNum", "Answer", "FixationX", "FixationY", "fixation_ser", "fixationDuration_s", "GazeLeftEyeX", "GazeLeftEyeY", "GazeRightEyeX", "GazeRightEyeY", "LeftEyePupilRadius_px", "RightEyePupilRadius_px", "GazeTimestamp_ms")  
+  
+data$fixation_ser <- suppressWarnings(as.numeric(as.character(data$fixation_ser))) # 
+data$fixation_ser[data$fixation_ser == "NA" | is.na(data$fixation_ser)] <- NA #  
+data$fixation_ser <- as.numeric(data$fixation_ser) 
+    
+result <- data.frame(stime = numeric(), etime = numeric(), sxp = numeric(), syp = numeric(), exp = numeric(), eyp = numeric(),stringsAsFactors = FALSE)  
+  
+# 遍历数据框，找到眼跳的开始和结束时间  
+for (i in 2:nrow(data)) {  
+  if (is.na(data$fixation_ser[i]) && !is.na(data$fixation_ser[i-1])) {  
+    start_time <- data$GazeTimestamp_ms[i-1] 
+    sxp <- data$FixationX[i-1]
+    syp <- data$FixationY[i-1]
+    next_fixation_index <- min(which(!is.na(data$fixation_ser[(i+1):nrow(data)]))) + i  
+    
+    if (is.infinite(next_fixation_index)) {  
+     next  }
+    end_time <- data$GazeTimestamp_ms[next_fixation_index]  
+    exp <- data$FixationX[next_fixation_index]
+    eyp <- data$FixationY[next_fixation_index]
+    result <- rbind(result, data.frame(stime = start_time, etime = end_time, sxp = sxp*1920, syp = syp*1080, exp = exp*1920, eyp = eyp*1080))  
+  }  
+}  
+  
+print(result)
+
+```
+
+
+```{R 整理格式}
+# 构建第三列dur，计算为etime减去stime  
+result <- result %>%  
+  mutate(dur = as.numeric(etime) - as.numeric(stime))  
+ 
+ # 计算距离的函数 
+calculate_distance <- function(x1, y1, x2, y2) {  
+  sqrt((x2 - x1)^2 + (y2 - y1)^2)  
+}  
+  
+# 应用函数到数据框的每一行，并生成新列ampl  
+result$ampl <- apply(result, 1, function(row) {  
+  calculate_distance(row["sxp"], row["syp"], row["exp"], row["eyp"])  
+})  
+
+result <- result %>%  
+  select(stime, etime, dur, sxp, syp, exp, eyp, ampl) 
+
+ write.csv(result, "saccades_result.csv", row.names = FALSE)
+```

@@ -1,0 +1,194 @@
+---
+title: "眼跳代码"
+author: "Caoshuang"
+date: "2024-10-20"
+output: html_document
+---
+
+# 代码作者：曹爽，如有问题请联系13279330193。
+# 特别鸣谢：多质课题组眼动数据分析团队成员
+## 邢辰，指导老师，提供技术指导。
+## 张亚娟，组织协调，提供数据支持。
+## 陈斯妤，协作讨论，提供技术支持。
+
+```{r 加载必要的包}
+library(tidyverse)
+```
+
+
+眼跳的转换算法
+```{r 眼跳处理}
+raw_data_path <- "data/demo/00a17d6c125942fcadcdf62eeec74ae2_295量表.csv"
+wideth <- 1920
+height <- 1080
+
+# 读取数据、重命名列名并转换指定列为数值型
+data <- read_csv(raw_data_path, skip = 1) %>%
+    rename_all(~ gsub("[/ ]", "_", .)) %>% # 替换列名中的 / 为 _
+    mutate_at(vars(4:14), ~ as.numeric(.)) %>% # 将第 4 到第 14 列转换为数值型
+    # 将 FixationX、FixationY 和 fixationDuration_s 列中数值为 -1 的值转换为 NA
+    mutate_at(vars(FixationX, FixationY, fixationDuration_s), ~ na_if(., -1))
+
+# 整理data数据，生成眼跳序号saccade_ser
+data <- data %>%
+    mutate(
+        # 创建 fixation_change 列，标记 fixation_ser 变为 NA 的位置
+        fixation_change = is.na(fixation_ser) & !is.na(lag(fixation_ser)),
+        # 计算 saccade_ser 的值，使用累积和生成序号
+        saccade_ser = cumsum(fixation_change)
+    ) %>%
+    fill(saccade_ser, .direction = "down") %>% # 向下填充 saccade_ser 列的值
+    mutate(saccade_ser = ifelse(is.na(fixation_ser), saccade_ser, NA)) %>% # 非眼跳区间标记为 NA
+    select(-fixation_change) %>% # 删除 fixation_change 列
+    relocate(saccade_ser, .after = fixationDuration_s) %>%
+    # 检查最大的 saccade_ser 序号是否与最大的 fixation_ser 序号相等，并进行相应处理
+    mutate(
+        max_saccade_ser = max(saccade_ser, na.rm = TRUE),
+        max_fixation_ser = max(fixation_ser, na.rm = TRUE),
+        saccade_ser = case_when(
+            saccade_ser == max_saccade_ser & max_saccade_ser == max_fixation_ser ~ NA_real_,
+            TRUE ~ saccade_ser
+        )
+    ) %>%
+    select(-max_saccade_ser, -max_fixation_ser)
+
+# 生成眼跳数据
+data <- data %>%
+    mutate(stime = GazeTimestamp_ms, etime = lead(GazeTimestamp_ms)) %>%
+    # 生成坐标数据sxp、syp、exp、eyp, sp等于上一行的FixationX、FixationY，ep等于下一行的FixationX、FixationY
+    mutate(
+        sxp = lag(FixationX),
+        syp = lag(FixationY),
+        exp = lead(FixationX),
+        eyp = lead(FixationY)
+    ) %>%
+    group_by(saccade_ser) %>%
+    # 重新赋值stime、etime、sxp、syp、exp、eyp列，每一类眼跳的stime等于第一行的stime，etime等于最后一行的etime, sp等于第一行的 sp，ep等于最后一行的ep
+    mutate(
+        stime = first(stime),
+        etime = last(etime),
+        sxp = first(sxp) * wideth,
+        syp = first(syp) * height,
+        exp = last(exp) * wideth,
+        eyp = last(eyp) * height
+    ) %>%
+    select(Id, QuestionsNum, Answer, stime, etime, sxp, syp, exp, eyp) %>%
+    drop_na() %>%
+    unique() %>%
+    mutate(dur = etime - stime, ampl = sqrt((exp - sxp)^2 + (eyp - syp)^2))
+```
+
+
+将上述算法打包成函数，可以看到，只输出了 3 个参数，分别是原始数据路径、屏幕宽度和屏幕高度。
+```{r 眼跳处理}
+# 打包函数，去掉开头的参数，剩下的直接复制粘贴缩进即可
+calculate_saccade <- function(raw_data_path, wideth, height) {
+    # 读取数据、重命名列名并转换指定列为数值型
+    data <- read_csv(raw_data_path, skip = 1) %>%
+        rename_all(~ gsub("[/ ]", "_", .)) %>% # 替换列名中的 / 为 _
+        mutate_at(vars(4:14), ~ as.numeric(.)) %>% # 将第 4 到第 14 列转换为数值型
+        # 将 FixationX、FixationY 和 fixationDuration_s 列中数值为 -1 的值转换为 NA
+        mutate_at(vars(FixationX, FixationY, fixationDuration_s), ~ na_if(., -1))
+
+    # 整理data数据，生成眼跳序号saccade_ser
+    data <- data %>%
+        mutate(
+            # 创建 fixation_change 列，标记 fixation_ser 变为 NA 的位置
+            fixation_change = is.na(fixation_ser) & !is.na(lag(fixation_ser)),
+            # 计算 saccade_ser 的值，使用累积和生成序号
+            saccade_ser = cumsum(fixation_change)
+        ) %>%
+        fill(saccade_ser, .direction = "down") %>% # 向下填充 saccade_ser 列的值
+        mutate(saccade_ser = ifelse(is.na(fixation_ser), saccade_ser, NA)) %>% # 非眼跳区间标记为 NA
+        select(-fixation_change) %>% # 删除 fixation_change 列
+        relocate(saccade_ser, .after = fixationDuration_s) %>%
+        # 检查最大的 saccade_ser 序号是否与最大的 fixation_ser 序号相等，并进行相应处理
+        mutate(
+            max_saccade_ser = max(saccade_ser, na.rm = TRUE),
+            max_fixation_ser = max(fixation_ser, na.rm = TRUE),
+            saccade_ser = case_when(
+                saccade_ser == max_saccade_ser & max_saccade_ser == max_fixation_ser ~ NA_real_,
+                TRUE ~ saccade_ser
+            )
+        ) %>%
+        select(-max_saccade_ser, -max_fixation_ser)
+
+    # 生成眼跳数据
+    data <- data %>%
+        mutate(stime = GazeTimestamp_ms, etime = lead(GazeTimestamp_ms)) %>%
+        # 生成坐标数据sxp、syp、exp、eyp, sp等于上一行的FixationX、FixationY，ep等于下一行的FixationX、FixationY
+        mutate(
+            sxp = lag(FixationX),
+            syp = lag(FixationY),
+            exp = lead(FixationX),
+            eyp = lead(FixationY)
+        ) %>%
+        group_by(saccade_ser) %>%
+        # 重新赋值stime、etime、sxp、syp、exp、eyp列，每一类眼跳的stime等于第一行的stime，etime等于最后一行的etime, sp等于第一行的 sp，ep等于最后一行的ep
+        mutate(
+            stime = first(stime),
+            etime = last(etime),
+            sxp = first(sxp) * wideth,
+            syp = first(syp) * height,
+            exp = last(exp) * wideth,
+            eyp = last(eyp) * height
+        ) %>%
+        select(Id, QuestionsNum, Answer, stime, etime, sxp, syp, exp, eyp) %>%
+        drop_na() %>%
+        unique() %>%
+        mutate(dur = etime - stime, ampl = sqrt((exp - sxp)^2 + (eyp - syp)^2))
+
+    return(data)
+}
+```
+
+接着尝试对一个目录下的所有文件批量处理，首先需要定义一个批量处理方法。
+```{r 批量处理}
+# 目录文件路径
+dir_path <- "data/demo"
+
+# 获取目录下所有文件路径
+file_paths <- list.files(dir_path, full.names = TRUE, recursive = FALSE)
+
+# 建立一个子目录，用于保存处理后的数据
+dir.create(file.path(dir_path, "saccades"), showWarnings = FALSE)
+
+# 使用tidyverse的map函数对所有文件进行批量处理
+map(file_paths, ~ {
+    # 生成保存路径
+    save_path <- file.path(dir_path, "saccades", paste0(basename(.x), "_saccades.csv"))
+    # 调用 calculate_saccade 函数处理数据
+    data <- calculate_saccade(.x, 1920, 1080)
+    # 保存处理后的数据
+    write_csv(data, save_path)
+})
+```
+
+为了简洁清晰，我们同样可以对批量处理的代码进行封装，生成一个批量处理的函数。
+```{r 批量处理}
+# 打包函数，去掉开头的参数，剩下的直接复制粘贴缩进即可
+batch_process_saccade <- function(dir_path, wideth, height) {
+    # 获取目录下所有文件路径
+    file_paths <- list.files(dir_path, full.names = TRUE, recursive = FALSE)
+
+    # 建立一个子目录，用于保存处理后的数据
+    dir.create(file.path(dir_path, "saccades"), showWarnings = FALSE)
+
+    # 使用tidyverse的map函数对所有文件进行批量处理
+    map(file_paths, ~ {
+        # 生成保存路径
+        save_path <- file.path(dir_path, "saccades", paste0(basename(.x), "_saccades.csv"))
+        # 调用 calculate_saccade 函数处理数据
+        data <- calculate_saccade(.x, wideth, height)
+        # 保存处理后的数据
+        write_csv(data, save_path)
+    })
+}
+```
+
+这样，实际使用时，只需要调用 `batch_process_saccade` 函数即可完成批量处理。
+```{r 批量处理}
+target_dir <- "data/demo"
+
+batch_process_saccade(target_dir, 1920, 1080)
+```
