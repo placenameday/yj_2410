@@ -1,0 +1,87 @@
+---
+title: "注视点代码"
+author: "xc"
+date: "2024-10-20"
+output:
+  html_document:
+    highlight: tango
+  pdf_document: default
+---
+基于眼跳方法的注视点原始数据计算方法
+
+```{r 加载必要的包}
+library(tidyverse)
+```
+
+注视点计算方法打包成函数。
+```{r 方法打包}
+# 打包函数，去掉开头的参数，剩下的直接复制粘贴缩进即可
+calculate_fixation <- function(raw_data_path, wideth, height) {
+    # 读取数据、重命名列名并转换指定列为数值型
+    data <- read_csv(raw_data_path, skip = 1) %>%
+        rename_all(~ gsub("[/ ]", "_", .)) %>% # 替换列名中的 / 为 _
+        mutate_at(vars(4:14), ~ as.numeric(.)) %>% # 将第 4 到第 14 列转换为数值型
+        # 将 FixationX、FixationY 和 fixationDuration_s 列中数值为 -1 的值转换为 NA
+        mutate_at(vars(FixationX, FixationY, fixationDuration_s), ~ na_if(., -1))
+
+    #
+    data <- data %>%
+        # 创建 stime 列，等于 GazeTimestamp_ms
+        # 创建 etime 列，等于下一行的 GazeTimestamp_ms
+        mutate(stime = GazeTimestamp_ms, etime = lead(GazeTimestamp_ms)) %>%
+        #
+        mutate(
+            axp = FixationX,
+            ayp = FixationY
+        ) %>%
+        group_by(fixation_ser) %>%
+        # 重新赋值 stime、etime、dur、axp、ayp、aps 列
+        mutate(
+            stime = first(stime), # 每组的 stime 等于该组的第一行的 stime
+            etime = last(etime), # 每组的 etime 等于该组的最后一行的 etime
+            dur = etime - stime, # 计算每组的持续时间 dur
+            axp = first(axp) * wideth,
+            ayp = first(ayp) * height,
+            # 计算 aps，等于每组的 LeftEyePupilRadius 和 RightEyePupilRadius 的平均值
+            aps = mean(c(LeftEyePupilRadius_px, RightEyePupilRadius_px), na.rm = TRUE)
+        ) %>%
+        ungroup() %>%
+        select(Id, QuestionsNum, fixation_ser, stime, etime, dur, axp, ayp, aps) %>%
+        drop_na() %>%
+        unique()
+
+    return(data)
+}
+```
+
+为了简洁清晰，我们同样可以对批量处理的代码进行封装，生成一个批量处理的函数。
+```{r 批量处理打包}
+# 打包函数，去掉开头的参数，剩下的直接复制粘贴缩进即可
+batch_process_fixation <- function(in_path, wideth, height) {
+    # 获取目录下所有文件路径
+    file_paths <- list.files(in_path, full.names = TRUE, recursive = FALSE)
+
+    # 获取原始数据目录的上一级目录
+    parent_dir <- dirname(in_path)
+
+    # 建立一个子目录，用于保存处理后的数据
+    dir.create(file.path(parent_dir, "fixations"), showWarnings = FALSE)
+
+    # 使用tidyverse的map函数对所有文件进行批量处理
+    map(file_paths, ~ {
+        # 生成保存路径
+        save_path <- file.path(parent_dir, "fixations", paste0(basename(.x), "_fixations.csv"))
+        # 调用 calculate_fixation 函数处理数据
+        data <- calculate_fixation(.x, wideth, height)
+        # 保存处理后的数据
+        write_csv(data, save_path)
+    })
+}
+```
+
+这样，实际使用时，只需要调用 `batch_process_fixation` 函数即可完成批量处理。
+```{r 运行}
+target_in <- "data/demo/raw"
+
+batch_process_fixation(target_in, 1920, 1080)
+```
