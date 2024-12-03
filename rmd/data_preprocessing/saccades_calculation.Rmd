@@ -14,93 +14,129 @@ library(tidyverse)
 
 眼跳计算方法打包成函数。
 ```{r 方法打包}
-# 打包函数，去掉开头的参数，剩下的直接复制粘贴缩进即可
-calculate_saccade <- function(raw_data_path, wideth, height) {
-    # 读取数据、重命名列名并转换指定列为数值型
-    data <- read_csv(raw_data_path, skip = 1) %>%
-        rename_all(~ gsub("[/ ]", "_", .)) %>% # 替换列名中的 / 为 _
-        mutate_at(vars(4:14), ~ as.numeric(.)) %>% # 将第 4 到第 14 列转换为数值型
-        # 将 FixationX、FixationY 和 fixationDuration_s 列中数值为 -1 的值转换为 NA
-        mutate_at(vars(FixationX, FixationY, fixationDuration_s), ~ na_if(., -1))
+calculate_saccade <- function(raw_data_path, width, height) {
+    # 参数验证
+    if (!file.exists(raw_data_path)) {
+        stop(glue("输入文件不存在: {raw_data_path}"))
+    }
+    if (!is.numeric(width) || !is.numeric(height) || width <= 0 || height <= 0) {
+        stop("width 和 height 必须是正数")
+    }
 
-    # 整理data数据，生成眼跳序号saccade_ser
-    data <- data %>%
-        mutate(
-            # 创建 fixation_change 列，标记 fixation_ser 变为 NA 的位置
-            fixation_change = is.na(fixation_ser) & !is.na(lag(fixation_ser)),
-            # 计算 saccade_ser 的值，使用累积和生成序号
-            saccade_ser = cumsum(fixation_change)
-        ) %>%
-        fill(saccade_ser, .direction = "down") %>% # 向下填充 saccade_ser 列的值
-        mutate(saccade_ser = ifelse(is.na(fixation_ser), saccade_ser, NA)) %>% # 非眼跳区间标记为 NA
-        select(-fixation_change) %>% # 删除 fixation_change 列
-        relocate(saccade_ser, .after = fixationDuration_s) %>%
-        # 检查最大的 saccade_ser 序号是否与最大的 fixation_ser 序号相等，并进行相应处理
-        mutate(
-            max_saccade_ser = max(saccade_ser, na.rm = TRUE),
-            max_fixation_ser = max(fixation_ser, na.rm = TRUE),
-            saccade_ser = case_when(
-                saccade_ser == max_saccade_ser & max_saccade_ser == max_fixation_ser ~ NA_real_,
-                TRUE ~ saccade_ser
-            )
-        ) %>%
-        select(-max_saccade_ser, -max_fixation_ser)
+    # 使用 tryCatch 进行错误处理
+    tryCatch(
+        {
+            # 读取数据、重命名列名并转换指定列为数值型
+            data <- read_csv(raw_data_path, skip = 1) %>%
+                rename_all(~ gsub("[/ ]", "_", .)) %>%
+                mutate_at(vars(4:14), ~ as.numeric(.)) %>%
+                mutate_at(vars(FixationX, FixationY, fixationDuration_s), ~ na_if(., -1))
 
-    # 生成眼跳数据
-    data <- data %>%
-        mutate(stime = GazeTimestamp_ms, etime = lead(GazeTimestamp_ms)) %>%
-        # 生成坐标数据sxp、syp、exp、eyp, sp等于上一行的FixationX、FixationY，ep等于下一行的FixationX、FixationY
-        mutate(
-            sxp = lag(FixationX),
-            syp = lag(FixationY),
-            exp = lead(FixationX),
-            eyp = lead(FixationY)
-        ) %>%
-        group_by(saccade_ser) %>%
-        # 重新赋值stime、etime、sxp、syp、exp、eyp列，每一类眼跳的stime等于第一行的stime，etime等于最后一行的etime, sp等于第一行的 sp，ep等于最后一行的ep
-        mutate(
-            stime = first(stime),
-            etime = last(etime),
-            sxp = first(sxp) * wideth,
-            syp = first(syp) * height,
-            exp = last(exp) * wideth,
-            eyp = last(eyp) * height
-        ) %>%
-        select(Id, QuestionsNum, Answer, stime, etime, sxp, syp, exp, eyp) %>%
-        drop_na() %>%
-        unique() %>%
-        mutate(
-            dur = etime - stime,
-            ampl = sqrt((exp - sxp)^2 + (eyp - syp)^2),
-            angle = atan2(eyp - syp, exp - sxp) * 180 / pi # 计算两点连线与 x 轴的夹角角度
-        )
+            # 整理data数据，生成眼跳序号saccade_ser
+            data <- data %>%
+                mutate(
+                    # 创建 fixation_change 列，标记 fixation_ser 变为 NA 的位置
+                    fixation_change = is.na(fixation_ser) & !is.na(lag(fixation_ser)),
+                    # 计算 saccade_ser 的值，使用累积和生成序号
+                    saccade_ser = cumsum(fixation_change)
+                ) %>%
+                fill(saccade_ser, .direction = "down") %>% # 向下填充 saccade_ser 列的值
+                mutate(saccade_ser = ifelse(is.na(fixation_ser), saccade_ser, NA)) %>% # 非眼跳区间标记为 NA
+                select(-fixation_change) %>% # 删除 fixation_change 列
+                relocate(saccade_ser, .after = fixationDuration_s) %>%
+                # 检查最大的 saccade_ser 序号是否与最大的 fixation_ser 序号相等，并进行相应处理
+                mutate(
+                    max_saccade_ser = max(saccade_ser, na.rm = TRUE),
+                    max_fixation_ser = max(fixation_ser, na.rm = TRUE),
+                    saccade_ser = case_when(
+                        saccade_ser == max_saccade_ser & max_saccade_ser == max_fixation_ser ~ NA_real_,
+                        TRUE ~ saccade_ser
+                    )
+                ) %>%
+                select(-max_saccade_ser, -max_fixation_ser)
 
-    return(data)
+            # 生成眼跳数据
+            data <- data %>%
+                mutate(stime = GazeTimestamp_ms, etime = lead(GazeTimestamp_ms)) %>%
+                # 生成坐标数据sxp、syp、exp、eyp, sp等于上一行的FixationX、FixationY，ep等于下一行的FixationX、FixationY
+                mutate(
+                    sxp = lag(FixationX),
+                    syp = lag(FixationY),
+                    exp = lead(FixationX),
+                    eyp = lead(FixationY)
+                ) %>%
+                group_by(saccade_ser) %>%
+                # 重新赋值stime、etime、sxp、syp、exp、eyp列，每一类眼跳的stime等于第一行的stime，etime等于最后一行的etime, sp等于第一行的 sp，ep等于最后一行的ep
+                mutate(
+                    stime = first(stime),
+                    etime = last(etime),
+                    sxp = first(sxp) * width,
+                    syp = first(syp) * height,
+                    exp = last(exp) * width,
+                    eyp = last(eyp) * height
+                ) %>%
+                select(Id, QuestionsNum, Answer, stime, etime, sxp, syp, exp, eyp) %>%
+                drop_na() %>%
+                unique() %>%
+                mutate(
+                    dur = etime - stime,
+                    ampl = sqrt((exp - sxp)^2 + (eyp - syp)^2),
+                    angle = atan2(eyp - syp, exp - sxp) * 180 / pi # 计算两点连线与 x 轴的夹角角度
+                )
+
+            return(data)
+        },
+        error = function(e) {
+            stop(glue("处理文件 {raw_data_path} 时发生错误: {e$message}"))
+        }
+    )
 }
 ```
 
 为了简洁清晰，我们同样可以对批量处理的代码进行封装，生成一个批量处理的函数。
 ```{r 批量处理打包}
-# 打包函数，去掉开头的参数，剩下的直接复制粘贴缩进即可
-batch_process_saccade <- function(in_path, wideth, height) {
-    # 获取目录下所有文件路径
-    file_paths <- list.files(in_path, full.names = TRUE, recursive = FALSE)
+batch_process_saccade <- function(in_path, width, height, out_dir = NULL) {
+    # 参数验证
+    if (!dir.exists(in_path)) {
+        stop(glue("输入目录不存在: {in_path}"))
+    }
+    if (!is.numeric(width) || !is.numeric(height) || width <= 0 || height <= 0) {
+        stop("width 和 height 必须是正数")
+    }
 
-    # 获取原始数据目录的上一级目录
+    # 设置输出目录
     parent_dir <- dirname(in_path)
+    out_dir <- if (is.null(out_dir)) file.path(parent_dir, "saccades") else out_dir
+    dir.create(out_dir, showWarnings = FALSE, recursive = TRUE)
 
-    # 建立一个子目录，用于保存处理后的数据
-    dir.create(file.path(parent_dir, "saccades"), showWarnings = FALSE)
+    # 获取文件列表
+    file_paths <- list.files(in_path, pattern = "\\.csv$", full.names = TRUE, recursive = FALSE)
+    if (length(file_paths) == 0) {
+        warning(glue("在 {in_path} 中没有找到CSV文件"))
+        return(invisible(NULL))
+    }
 
-    # 使用tidyverse的map函数对所有文件进行批量处理
-    map(file_paths, ~ {
-        # 生成保存路径
-        save_path <- file.path(parent_dir, "saccades", paste0(basename(.x), "_saccades.csv"))
-        # 调用 calculate_saccade 函数处理数据
-        data <- calculate_saccade(.x, wideth, height)
-        # 保存处理后的数据
-        write_csv(data, save_path)
+    # 批量处理
+    message(glue("开始处理 {length(file_paths)} 个文件..."))
+
+    results <- map(file_paths, function(file_path) {
+        tryCatch(
+            {
+                save_path <- file.path(out_dir, paste0(basename(file_path), "_saccades.csv"))
+                data <- calculate_saccade(file_path, width, height)
+                write_csv(data, save_path)
+                message(glue("成功处理: {basename(file_path)}"))
+                return(TRUE)
+            },
+            error = function(e) {
+                warning(glue("处理 {basename(file_path)} 失败: {e$message}"))
+                return(FALSE)
+            }
+        )
     })
+
+    success_count <- sum(unlist(results))
+    message(glue("处理完成: {success_count}/{length(file_paths)} 个文件成功"))
 }
 ```
 

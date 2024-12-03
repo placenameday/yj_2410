@@ -1,0 +1,137 @@
+---
+title: "瞳孔大小变化率计算"
+author: "xc"
+date: "2024-10-20"
+output:
+  html_document:
+    highlight: tango
+    toc: true
+    toc_float: true
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+## 简介
+本文档用于处理眼动实验的原始数据，计算瞳孔大小变化率。对于每个题目的前500ms做瞳孔大小的均值计算作为基线，之后的瞳孔大小数据换算成对基线的变化率。
+
+## 加载依赖包
+```{r}
+library(tidyverse)
+library(glue)
+```
+
+## 瞳孔变化率计算函数
+```{r}
+calculate_pupil_change_rate <- function(raw_data_path, out_dir) {
+    # 参数验证
+    if (!file.exists(raw_data_path)) {
+        stop(glue("输入文件不存在: {raw_data_path}"))
+    }
+
+    # 创建输出目录
+    dir.create(out_dir, showWarnings = FALSE, recursive = TRUE)
+
+    # 读取数据
+    data <- read_csv(raw_data_path, skip = 1) %>%
+        rename_all(~ gsub("[/ ]", "_", .)) %>%
+        mutate_at(vars(4:14), ~ as.numeric(.)) %>%
+        mutate_at(vars(FixationX, FixationY, fixationDuration_s), ~ na_if(., -1))
+
+    # 计算瞳孔大小变化率
+    pupil_data <- data %>%
+        group_by(Id, QuestionsNum) %>%
+        mutate(
+            # 计算当前瞳孔大小（左右眼平均）
+            # 如果左右眼任一为0或NA，则结果为NA
+            current_pupil_size = case_when(
+                is.na(LeftEyePupilRadius_px) | is.na(RightEyePupilRadius_px) ~ NA_real_,
+                LeftEyePupilRadius_px == 0 | RightEyePupilRadius_px == 0 ~ NA_real_,
+                TRUE ~ (LeftEyePupilRadius_px + RightEyePupilRadius_px) / 2
+            ),
+
+            # 计算基线（前500ms的平均值）
+            # 只使用有效的瞳孔大小数据计算基线
+            baseline_pupil_size = first(mean(current_pupil_size[GazeTimestamp_ms <= min(GazeTimestamp_ms) + 500],
+                na.rm = TRUE
+            )),
+
+            # 计算变化率
+            # 只在当前瞳孔大小和基线都有效时计算变化率
+            pupil_change_rate = case_when(
+                is.na(current_pupil_size) ~ NA_real_,
+                is.na(baseline_pupil_size) | baseline_pupil_size == 0 ~ NA_real_,
+                TRUE ~ (current_pupil_size - baseline_pupil_size) / baseline_pupil_size
+            )
+        ) %>%
+        select(Id, QuestionsNum, GazeTimestamp_ms, current_pupil_size, baseline_pupil_size, pupil_change_rate) %>%
+        ungroup()
+
+    # 检查数据
+    message(glue("数据检查:"))
+    message(glue("总行数: {nrow(pupil_data)}"))
+    message(glue("NA值统计:"))
+    message(glue("current_pupil_size NA数: {sum(is.na(pupil_data$current_pupil_size))}"))
+    message(glue("baseline_pupil_size NA数: {sum(is.na(pupil_data$baseline_pupil_size))}"))
+    message(glue("pupil_change_rate NA数: {sum(is.na(pupil_data$pupil_change_rate))}"))
+
+    # 保存结果
+    save_path <- file.path(out_dir, paste0(basename(raw_data_path), "_pupil_change_rate.csv"))
+    write_csv(pupil_data, save_path)
+
+    message(glue("成功处理: {basename(raw_data_path)}，结果已保存到 {save_path}"))
+}
+```
+
+## 批量处理函数
+```{r}
+batch_process_pupil <- function(in_path, out_dir = NULL) {
+    # 参数验证
+    if (!dir.exists(in_path)) {
+        stop(glue("输入目录不存在: {in_path}"))
+    }
+
+    # 设置输出目录
+    parent_dir <- dirname(in_path)
+    out_dir <- if (is.null(out_dir)) file.path(parent_dir, "pupil") else out_dir
+    dir.create(out_dir, showWarnings = FALSE, recursive = TRUE)
+
+    # 获取文件列表
+    file_paths <- list.files(in_path, pattern = "\\.csv$", full.names = TRUE, recursive = FALSE)
+    if (length(file_paths) == 0) {
+        warning(glue("在 {in_path} 中没有找到CSV文件"))
+        return(invisible(NULL))
+    }
+
+    # 批量处理
+    message(glue("开始处理 {length(file_paths)} 个文件..."))
+
+    results <- map(file_paths, function(file_path) {
+        tryCatch(
+            {
+                calculate_pupil_change_rate(file_path, out_dir)
+                return(TRUE)
+            },
+            error = function(e) {
+                warning(glue("处理 {basename(file_path)} 失败: {e$message}"))
+                return(FALSE)
+            }
+        )
+    })
+
+    success_count <- sum(unlist(results))
+    message(glue("处理完成: {success_count}/{length(file_paths)} 个文件成功"))
+}
+```
+
+## 使用示例
+```{r}
+# 设置输入路径
+target_in <- "data/demo/raw"
+output_dir <- "data/demo/pupil"
+
+# 执行批量处理
+batch_process_pupil(target_in, output_dir)
+```

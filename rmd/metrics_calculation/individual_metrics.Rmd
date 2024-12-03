@@ -1,0 +1,247 @@
+---
+title: "个体眼动指标分析"
+author: "xc"
+date: "2024-10-20"
+output:
+  html_document:
+    highlight: tango
+    toc: true
+    toc_float: true
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+## 简介
+本文档用于计算和输出个体层面的眼动指标，包括：
+- 平均注视点个数
+- 注视点平均时长
+- 平均眼跳幅度
+- 平均眼跳持续时间
+等基本指标。
+
+## 加载依赖包
+
+```{r}
+library(tidyverse)
+library(glue)
+```
+
+## 指标计算函数
+
+```{r}
+calculate_individual_metrics <- function(fixation_path, saccade_path, pupil_path) {
+    # 参数验证
+    if (!file.exists(fixation_path)) {
+        stop(glue("注视点数据文件不存在: {fixation_path}"))
+    }
+    if (!file.exists(saccade_path)) {
+        stop(glue("眼跳数据文件不存在: {saccade_path}"))
+    }
+    if (!file.exists(pupil_path)) {
+        stop(glue("瞳孔数据文件不存在: {pupil_path}"))
+    }
+
+    tryCatch(
+        {
+            # 读取数据
+            fixation_data <- read_csv(fixation_path)
+            saccade_data <- read_csv(saccade_path)
+            pupil_data <- read_csv(pupil_path)
+
+            # 按题目计算注视点指标
+            fixation_by_question <- fixation_data %>%
+                group_by(Id, QuestionsNum) %>%
+                summarise(
+                    fixation_count = n(), # 注视点个数
+                    mean_fixation_duration = mean(dur) # 平均注视时长
+                ) %>%
+                ungroup()
+
+            # 按被试计算注视点指标
+            fixation_by_subject <- fixation_data %>%
+                group_by(Id) %>%
+                summarise(
+                    total_fixation_count = n(), # 总注视点个数
+                    overall_mean_fixation_duration = mean(dur) # 整体平均注视时长
+                ) %>%
+                ungroup()
+
+            # 按题目计算眼跳指标
+            saccade_by_question <- saccade_data %>%
+                group_by(Id, QuestionsNum) %>%
+                summarise(
+                    mean_saccade_amplitude = mean(ampl), # 平均眼跳幅度
+                    mean_saccade_angle = mean(angle) # 平均眼跳角度
+                ) %>%
+                ungroup()
+
+            # 按被试计算眼跳指标
+            saccade_by_subject <- saccade_data %>%
+                group_by(Id) %>%
+                summarise(
+                    overall_mean_saccade_amplitude = mean(ampl), # 整体平均眼跳幅度
+                    overall_mean_saccade_angle = mean(angle) # 整体平均眼跳角度
+                ) %>%
+                ungroup()
+
+            # 按题目计算瞳孔指标
+            pupil_by_question <- pupil_data %>%
+                group_by(Id, QuestionsNum) %>%
+                summarise(
+                    mean_pupil_change_rate = mean(pupil_change_rate, na.rm = TRUE) # 平均瞳孔变化率
+                ) %>%
+                ungroup()
+
+            # 按被试计算瞳孔指标
+            pupil_by_subject <- pupil_data %>%
+                group_by(Id) %>%
+                summarise(
+                    overall_mean_pupil_change_rate = mean(pupil_change_rate, na.rm = TRUE) # 整体平均瞳孔变化率
+                ) %>%
+                ungroup()
+
+            # 合并题目级别的指标
+            metrics_by_question <- fixation_by_question %>%
+                left_join(saccade_by_question, by = c("Id", "QuestionsNum")) %>%
+                left_join(pupil_by_question, by = c("Id", "QuestionsNum"))
+
+            # 合并被试级别的指标
+            metrics_by_subject <- fixation_by_subject %>%
+                left_join(saccade_by_subject, by = "Id") %>%
+                left_join(pupil_by_subject, by = "Id")
+
+            return(list(
+                by_question = metrics_by_question,
+                by_subject = metrics_by_subject
+            ))
+        },
+        error = function(e) {
+            stop(glue("处理文件时发生错误: {e$message}"))
+        }
+    )
+}
+```
+
+## 批量处理函数
+
+```{r}
+batch_process_metrics <- function(fixation_dir, saccade_dir, pupil_dir, out_dir = NULL) {
+    # 参数验证
+    if (!dir.exists(fixation_dir)) {
+        stop(glue("输入目录不存在: {fixation_dir}"))
+    }
+    if (!dir.exists(saccade_dir)) {
+        stop(glue("输入目录不存在: {saccade_dir}"))
+    }
+    if (!dir.exists(pupil_dir)) {
+        stop(glue("输入目录不存在: {pupil_dir}"))
+    }
+
+    # 设置输出目录
+    parent_dir <- dirname(fixation_dir)
+    out_dir <- if (is.null(out_dir)) file.path(parent_dir, "metrics") else out_dir
+    dir.create(out_dir, showWarnings = FALSE, recursive = TRUE)
+
+    # 获取文件列表
+    fixation_files <- list.files(fixation_dir, pattern = "\\.csv$", full.names = TRUE)
+
+    # 批量处理
+    message(glue("开始处理 {length(fixation_files)} 个文件..."))
+
+    # 使用 map 处理文件并返回结果列表
+    results <- fixation_files %>%
+        map(function(fix_file) {
+            tryCatch(
+                {
+                    # 构建对应的文件路径
+                    base_name <- basename(fix_file)
+                    sac_file <- file.path(
+                        saccade_dir,
+                        gsub("_fixations\\.csv$", "_saccades.csv", base_name)
+                    )
+                    pupil_file <- file.path(
+                        pupil_dir,
+                        gsub("_fixations\\.csv$", "_pupil_change_rate.csv", base_name)
+                    )
+
+                    if (!file.exists(sac_file)) {
+                        warning(glue("找不到对应的眼跳文件: {sac_file}"))
+                        return(NULL)
+                    }
+                    if (!file.exists(pupil_file)) {
+                        warning(glue("找不到对应的瞳孔文件: {pupil_file}"))
+                        return(NULL)
+                    }
+
+                    # 计算指标
+                    metrics <- calculate_individual_metrics(fix_file, sac_file, pupil_file)
+
+                    # 保存单个文件的结果
+                    file_prefix <- gsub("_fixations\\.csv$", "", base_name)
+                    write_csv(
+                        metrics$by_question,
+                        file.path(out_dir, paste0(file_prefix, "_question_metrics.csv"))
+                    )
+                    write_csv(
+                        metrics$by_subject,
+                        file.path(out_dir, paste0(file_prefix, "_subject_metrics.csv"))
+                    )
+
+                    message(glue("成功处理: {basename(fix_file)}"))
+                    return(metrics)
+                },
+                error = function(e) {
+                    warning(glue("处理 {basename(fix_file)} 失败: {e$message}"))
+                    return(NULL)
+                }
+            )
+        })
+
+    # 过滤掉NULL结果并合并数据
+    valid_results <- results %>% compact()
+
+    if (length(valid_results) > 0) {
+        # 合并题目级别指标
+        combined_question_metrics <- valid_results %>%
+            map("by_question") %>%
+            bind_rows()
+        write_csv(
+            combined_question_metrics,
+            file.path(out_dir, "combined_question_metrics.csv")
+        )
+        message(glue("已生成合并的题目级别指标文件"))
+
+        # 合并被试级别指标
+        combined_subject_metrics <- valid_results %>%
+            map("by_subject") %>%
+            bind_rows()
+        write_csv(
+            combined_subject_metrics,
+            file.path(out_dir, "combined_subject_metrics.csv")
+        )
+        message(glue("已生成合并的被试级别指标文件"))
+    } else {
+        warning("没有成功处理的数据")
+    }
+
+    # 返回处理结果统计
+    success_count <- length(valid_results)
+    message(glue("处理完成: {success_count}/{length(fixation_files)} 个文件成功"))
+}
+```
+
+## 使用示例
+
+```{r}
+# 设置输入路径
+fixation_dir <- "data/demo/fixations"
+saccade_dir <- "data/demo/saccades"
+pupil_dir <- "data/demo/pupil"
+output_dir <- "data/demo/metrics"
+
+# 执行批量处理
+batch_process_metrics(fixation_dir, saccade_dir, pupil_dir, output_dir)
+```
