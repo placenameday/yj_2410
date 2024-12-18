@@ -1,0 +1,391 @@
+---
+title: "眼动指标分布特征对比分析：个体水平 vs 任务水平"
+author: "xc"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    number_sections: true
+    theme: united
+    highlight: tango
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+    echo = TRUE,
+    warning = FALSE,
+    message = FALSE,
+    fig.width = 12,
+    fig.height = 6
+)
+```
+
+# 简介
+
+本文档对比分析眼动指标在个体水平和任务水平的分布特征差异，主要包括：
+1. 分布形态的可视化对比
+2. 正态性检验
+3. 描述性统计分析
+
+# 加载依赖包
+
+```{r}
+library(tidyverse)
+library(moments) # 用于计算偏度和峰度
+library(nortest) # 用于正态性检验
+library(gridExtra) # 用于组合图形
+library(knitr)
+```
+
+# 数据处理
+
+```{r}
+# 1. 读取和预处理数据
+dt_original <- read_csv("data/demo/metrics/combined_question_metrics.csv")
+
+# 2. 定义数据有效性检验函数
+validate_metrics <- function(data) {
+    data %>% mutate(
+        valid_fixation_count = fixation_count >= 1,
+        valid_fixation_duration =
+            mean_fixation_duration >= 50 &
+                mean_fixation_duration <= 2000,
+        valid_saccade_amplitude =
+            mean_saccade_amplitude <= 500,
+        valid_saccade_angle =
+            !is.na(mean_saccade_angle),
+        valid_pupil_change_rate =
+            abs(mean_pupil_change_rate) <= 0.2
+    )
+}
+
+# 3. 进行有效性检验
+dt_valid <- dt_original %>%
+    group_by(Id, QuestionsNum) %>%
+    validate_metrics() %>%
+    ungroup()
+
+# 4. 定义分析变量
+variables <- c(
+    "fixation_count", "mean_fixation_duration",
+    "mean_saccade_amplitude", "mean_saccade_angle",
+    "mean_pupil_change_rate"
+)
+
+# 5. 计算个体平均值
+subject_means <- dt_valid %>%
+    group_by(Id) %>%
+    summarise(across(
+        all_of(variables),
+        ~ {
+            valid_col <- paste0("valid_", gsub("mean_", "", cur_column()))
+            mean(.x[get(valid_col)], na.rm = TRUE)
+        }
+    )) %>%
+    ungroup()
+```
+
+# 分布特征分析
+
+## 可视化对比
+
+```{r}
+# 为每个变量创建对比图
+for (var in variables) {
+    # 获取有效性列名
+    valid_col <- paste0("valid_", gsub("mean_", "", var))
+
+    # 准备任务水平数据
+    task_data <- dt_valid[[var]][dt_valid[[valid_col]]]
+
+    # 准备个体水平数据
+    subject_data <- subject_means[[var]]
+
+    # 创建QQ图
+    p1 <- ggplot() +
+        stat_qq(aes(sample = task_data, color = "任务水平")) +
+        stat_qq(aes(sample = subject_data, color = "个体水平")) +
+        stat_qq_line(aes(sample = task_data), color = "red", linetype = "dashed") +
+        scale_color_manual(values = c("任务水平" = "red", "个体水平" = "blue")) +
+        labs(
+            title = paste(var, "的Q-Q图对比"),
+            x = "理论分位数",
+            y = "样本分位数",
+            color = "数据水平"
+        ) +
+        theme_minimal()
+
+    # 创建密度图
+    p2 <- ggplot() +
+        geom_density(aes(x = task_data, fill = "任务水平"), alpha = 0.5) +
+        geom_density(aes(x = subject_data, fill = "个体水平"), alpha = 0.5) +
+        scale_fill_manual(values = c("任务水平" = "red", "个体水平" = "blue")) +
+        labs(
+            title = paste(var, "的密度分布对比"),
+            x = var,
+            y = "密度",
+            fill = "数据水平"
+        ) +
+        theme_minimal()
+
+    # 组合图形
+    combined_plot <- grid.arrange(p1, p2, ncol = 2)
+
+    # 保存组合图
+    ggsave(
+        filename = file.path(plot_dir, paste0(var, "_distribution_comparison.png")),
+        plot = combined_plot,
+        width = 12,
+        height = 6,
+        dpi = 300
+    )
+}
+```
+
+## 正态性检验
+
+```{r}
+# 对每个变量进行正态性检验
+normality_tests <- lapply(variables, function(var) {
+    # 获取有效性列名
+    valid_col <- paste0("valid_", gsub("mean_", "", var))
+
+    # 任务水平数据
+    task_data <- dt_valid[[var]][dt_valid[[valid_col]]]
+
+    # 个体水平数据
+    subject_data <- subject_means[[var]]
+
+    # Shapiro-Wilk检验（如果样本量小于5000）
+    # Anderson-Darling检验（对大样本更合适）
+    task_test <- if (length(task_data) < 5000) {
+        shapiro.test(task_data)
+    } else {
+        ad.test(task_data)
+    }
+
+    subject_test <- if (length(subject_data) < 5000) {
+        shapiro.test(subject_data)
+    } else {
+        ad.test(subject_data)
+    }
+
+    # 计算偏度和峰度
+    task_skew <- skewness(task_data, na.rm = TRUE)
+    task_kurt <- kurtosis(task_data, na.rm = TRUE)
+    subject_skew <- skewness(subject_data, na.rm = TRUE)
+    subject_kurt <- kurtosis(subject_data, na.rm = TRUE)
+
+    data.frame(
+        Variable = var,
+        Level = c("任务水平", "个体水平"),
+        Test_Statistic = c(task_test$statistic, subject_test$statistic),
+        P_Value = c(task_test$p.value, subject_test$p.value),
+        Skewness = c(task_skew, subject_skew),
+        Kurtosis = c(task_kurt, subject_kurt),
+        Sample_Size = c(length(task_data), length(subject_data))
+    )
+})
+
+normality_summary <- do.call(rbind, normality_tests)
+
+# 打印结果表格
+kable(normality_summary,
+    digits = 4,
+    col.names = c(
+        "指标", "数据水平", "检验统计量", "P值",
+        "偏度", "峰度", "样本量"
+    ),
+    caption = "正态性检验结果"
+)
+```
+
+## 描述性统计
+
+```{r}
+# 计算描述性统计量
+descriptive_stats <- lapply(variables, function(var) {
+    # 获取有效性列名
+    valid_col <- paste0("valid_", gsub("mean_", "", var))
+
+    # 任务水平数据
+    task_data <- dt_valid[[var]][dt_valid[[valid_col]]]
+
+    # 个体水平数据
+    subject_data <- subject_means[[var]]
+
+    # 计算统计量
+    task_stats <- c(
+        mean(task_data, na.rm = TRUE),
+        sd(task_data, na.rm = TRUE),
+        median(task_data, na.rm = TRUE),
+        IQR(task_data, na.rm = TRUE),
+        quantile(task_data, probs = c(0.25, 0.75), na.rm = TRUE)
+    )
+
+    subject_stats <- c(
+        mean(subject_data, na.rm = TRUE),
+        sd(subject_data, na.rm = TRUE),
+        median(subject_data, na.rm = TRUE),
+        IQR(subject_data, na.rm = TRUE),
+        quantile(subject_data, probs = c(0.25, 0.75), na.rm = TRUE)
+    )
+
+    data.frame(
+        Variable = var,
+        Level = c("任务水平", "个体水平"),
+        Mean = c(task_stats[1], subject_stats[1]),
+        SD = c(task_stats[2], subject_stats[2]),
+        Median = c(task_stats[3], subject_stats[3]),
+        IQR = c(task_stats[4], subject_stats[4]),
+        Q1 = c(task_stats[5], subject_stats[5]),
+        Q3 = c(task_stats[6], subject_stats[6])
+    )
+})
+
+descriptive_summary <- do.call(rbind, descriptive_stats)
+
+# 打印结果表格
+kable(descriptive_summary,
+    digits = 2,
+    col.names = c(
+        "指标", "数据水平", "均值", "标准差",
+        "中位数", "四分位距", "Q1", "Q3"
+    ),
+    caption = "描述性统计结果"
+)
+```
+
+# 讨论与解释
+
+## 分布形态差异
+
+1. **中心极限定理的影响**：
+   - 个体水平数据是多个观测值的平均，根据中心极限定理，其分布更接近正态分布
+   - 任务水平数据包含更多的随机波动，因此分布可能更不规则
+
+2. **变异性比较**：
+   - 个体水平数据的变异性通常小于任务水平
+   - 这反映了个体内部的稳定性特征
+
+## 实践意义
+
+1. **数据分析建议**：
+   - 对个体水平数据，可以更多地使用基于正态分布的统计方法
+   - 对任务水平数据，可能需要考虑使用非参数方法
+
+2. **应用价值**：
+   - 个体水平的正态性更好，有利于进行个体差异研究
+   - 可用于建立更稳定的个体特征指标
+
+## 局限性
+
+1. **平均化效应**：
+   - 个体水平的正态性可能部分源于平均化过程
+   - 需要权衡信息损失和分布优化之间的关系
+
+2. **样本量影响**：
+   - 个体水平的样本量较小，可能影响正态性检验的可靠性
+   - 需要考虑样本量对检验结果的影响
+
+# 结果保存
+
+```{r}
+# 创建结果目录结构
+result_dir <- "data/results/distribution_comparison"
+table_dir <- file.path(result_dir, "tables")
+plot_dir <- file.path(result_dir, "plots")
+plot_dir_individual <- file.path(plot_dir, "individual_level")
+plot_dir_task <- file.path(plot_dir, "task_level")
+
+# 创建所有目录
+dir.create(table_dir, showWarnings = FALSE, recursive = TRUE)
+dir.create(plot_dir_individual, showWarnings = FALSE, recursive = TRUE)
+dir.create(plot_dir_task, showWarnings = FALSE, recursive = TRUE)
+
+# 保存CSV表格
+write.csv(normality_summary,
+    file.path(table_dir, "normality_tests.csv"),
+    row.names = FALSE,
+    fileEncoding = "UTF-8"
+)
+
+write.csv(descriptive_summary,
+    file.path(table_dir, "descriptive_statistics.csv"),
+    row.names = FALSE,
+    fileEncoding = "UTF-8"
+)
+
+# 创建Excel工作簿并保存所有表格
+wb <- createWorkbook()
+
+# 添加正态性检验结果工作表
+addWorksheet(wb, "正态性检验")
+writeData(wb, "正态性检验", normality_summary, rowNames = FALSE)
+setColWidths(wb, "正态性检验", cols = 1:ncol(normality_summary), widths = 15)
+
+# 添加描述��统计工作表
+addWorksheet(wb, "描述性统计")
+writeData(wb, "描述性统计", descriptive_summary, rowNames = FALSE)
+setColWidths(wb, "描述性统计", cols = 1:ncol(descriptive_summary), widths = 15)
+
+# 保存Excel文件
+saveWorkbook(wb,
+    file.path(table_dir, "distribution_analysis.xlsx"),
+    overwrite = TRUE
+)
+
+# 保存所有分布图
+# 个体水平分布图
+for (var in variables) {
+    # 获取有效性列名
+    valid_col <- paste0("valid_", gsub("mean_", "", var))
+
+    p_individual <- ggplot(subject_means, aes(x = .data[[var]])) +
+        geom_histogram(aes(y = ..density..), bins = 30, fill = "lightblue", alpha = 0.7) +
+        geom_density(color = "red") +
+        theme_minimal() +
+        labs(
+            title = paste(var, "的个体水平分布"),
+            x = var,
+            y = "密度"
+        )
+
+    ggsave(
+        filename = file.path(plot_dir_individual, paste0(var, "_distribution.png")),
+        plot = p_individual,
+        width = 8,
+        height = 6,
+        dpi = 300
+    )
+}
+
+# 任务水平分布图
+for (var in variables) {
+    # 获取有效性列名和有效数据
+    valid_col <- paste0("valid_", gsub("mean_", "", var))
+    valid_task_data <- dt_valid %>%
+        filter(!!sym(valid_col)) %>%
+        select(!!sym(var))
+
+    p_task <- ggplot(valid_task_data, aes(x = .data[[var]])) +
+        geom_histogram(aes(y = ..density..), bins = 30, fill = "lightgreen", alpha = 0.7) +
+        geom_density(color = "blue") +
+        theme_minimal() +
+        labs(
+            title = paste(var, "的任务水平分布"),
+            x = var,
+            y = "密度"
+        )
+
+    ggsave(
+        filename = file.path(plot_dir_task, paste0(var, "_distribution.png")),
+        plot = p_task,
+        width = 8,
+        height = 6,
+        dpi = 300
+    )
+}
+``` 

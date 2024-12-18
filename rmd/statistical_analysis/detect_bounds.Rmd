@@ -1,0 +1,551 @@
+---
+title: "眼动指标异常值检测标准"
+author: "xc"
+date: "2024-12-18"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    number_sections: true
+    theme: united
+    highlight: tango
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+    echo = TRUE,
+    warning = FALSE,
+    message = FALSE,
+    fig.width = 10,
+    fig.height = 6
+)
+```
+
+# 简介
+
+本文档用于建立眼动指标的异常值检测标准。主要包括：
+
+## 分析指标
+- **注视点指标**
+  - 注视点个数 (fixation_count)
+  - 平均注视时长 (mean_fixation_duration)
+- **眼跳指标**
+  - 平均眼跳幅度 (mean_saccade_amplitude)
+  - 平均眼跳角度 (mean_saccade_angle)
+- **瞳孔指标**
+  - 平均瞳孔变化率 (mean_pupil_change_rate)
+
+## 分析步骤
+1. 数据有效性检验
+2. 计算严格标准（MAD方法）
+3. 计算宽松标准（IQR方法）
+4. 可视化分析
+5. 生成诊断标准表
+
+# 加载依赖包
+
+```{r}
+library(tidyverse) # 数据处理和可视化
+library(stats) # 统计函数
+library(openxlsx)
+```
+
+# 数据处理和分析
+## 异常边界检测
+```{r}
+# 1. 修改数据有效性检验函数，为每个指标单独检验
+validate_metrics <- function(data) {
+    # 为每个指标创建独立的有效性标记
+    data %>% mutate(
+        valid_fixation_count = fixation_count >= 1,
+        valid_fixation_duration =
+            mean_fixation_duration >= 50 &
+                mean_fixation_duration <= 2000,
+        valid_saccade_amplitude =
+            mean_saccade_amplitude <= 500,
+        valid_saccade_angle =
+            !is.na(mean_saccade_angle), # 根据实际需求设置条件
+
+        valid_pupil_change_rate =
+            abs(mean_pupil_change_rate) <= 0.2
+    )
+}
+
+# 2. 读取原始数据并进行有效性筛选
+dt_original <- read_csv("data/demo/metrics/combined_question_metrics.csv")
+
+dt_valid <- dt_original %>%
+    group_by(Id, QuestionsNum) %>%
+    validate_metrics() %>%
+    ungroup()
+
+# 3. 定义异常值检测函数（MAD方法和IQR方法）
+detect_bounds <- function(x, var_name, method = c("mad", "iqr")) {
+    method <- match.arg(method)
+
+    # 定义需要非负值的变量及其最小值
+    min_values <- list(
+        fixation_count = 1, # 至少要有1个注视点
+        mean_fixation_duration = 50 # 最短注视时长50ms
+    )
+
+    if (method == "mad") {
+        # MAD方法（严格标准）
+        med <- median(x, na.rm = TRUE)
+        mad_val <- mad(x, na.rm = TRUE)
+        lower <- med - 3 * mad_val
+        upper <- med + 3 * mad_val
+
+        # 如果是有最小值限制的变量，使用预设的最小值
+        if (var_name %in% names(min_values)) {
+            lower <- max(min_values[[var_name]], lower)
+        }
+
+        list(
+            method = "MAD (严格标准)",
+            lower = lower,
+            upper = upper,
+            center = med
+        )
+    } else {
+        # IQR方法（宽松标准）
+        q1 <- quantile(x, 0.25, na.rm = TRUE)
+        q3 <- quantile(x, 0.75, na.rm = TRUE)
+        iqr <- q3 - q1
+        lower <- q1 - 1.5 * iqr
+        upper <- q3 + 1.5 * iqr
+
+        # 如果是有最小值限制的变量，使用预设的最小值
+        if (var_name %in% names(min_values)) {
+            lower <- max(min_values[[var_name]], lower)
+        }
+
+        list(
+            method = "IQR (宽松标准)",
+            lower = lower,
+            upper = upper,
+            center = median(x, na.rm = TRUE)
+        )
+    }
+}
+
+# 4. 计算各指标的界限值
+variables <- c(
+    "fixation_count", "mean_fixation_duration",
+    "mean_saccade_amplitude", "mean_saccade_angle",
+    "mean_pupil_change_rate"
+)
+
+# 只使用有效数据计算界限
+diagnostic_bounds <- lapply(variables, function(var) {
+    # 获取对应的有效性列名
+    valid_col <- paste0("valid_", gsub("mean_", "", var))
+
+    # 使用对应指标的有效数据
+    valid_data <- dt_valid[[var]][dt_valid[[valid_col]]]
+
+    # 计算界限
+    mad_bounds <- detect_bounds(valid_data, var, "mad")
+    iqr_bounds <- detect_bounds(valid_data, var, "iqr")
+
+    # 合并结果
+    data.frame(
+        Variable = var,
+        Method = c(mad_bounds$method, iqr_bounds$method),
+        Lower_Bound = c(mad_bounds$lower, iqr_bounds$lower),
+        Upper_Bound = c(mad_bounds$upper, iqr_bounds$upper),
+        Center = c(mad_bounds$center, iqr_bounds$center)
+    )
+})
+
+diagnostic_bounds <- do.call(rbind, diagnostic_bounds)
+
+# 5. 可视化界限和分布
+for (var in variables) {
+    # 获取对应的有效性列名
+    valid_col <- paste0("valid_", gsub("mean_", "", var))
+    var_bounds <- subset(diagnostic_bounds, Variable == var)
+
+    p <- ggplot() +
+        # 有效数据分布
+        geom_density(
+            data = filter(dt_valid, .data[[valid_col]]), # 使用对应指标的有效性标记
+            aes(x = .data[[var]], fill = "有效数据"),
+            alpha = 0.3
+        ) +
+        # 添加界限线
+        geom_vline(
+            data = var_bounds,
+            aes(
+                xintercept = Lower_Bound,
+                color = Method
+            ),
+            linetype = "dashed"
+        ) +
+        geom_vline(
+            data = var_bounds,
+            aes(
+                xintercept = Upper_Bound,
+                color = Method
+            ),
+            linetype = "dashed"
+        ) +
+        geom_vline(
+            data = var_bounds,
+            aes(
+                xintercept = Center,
+                color = Method
+            )
+        ) +
+        scale_fill_manual(values = c(
+            "有效数据" = "lightblue"
+        )) +
+        scale_color_manual(values = c(
+            "MAD (严格标准)" = "red",
+            "IQR (宽松标准)" = "blue"
+        )) +
+        theme_minimal() +
+        labs(
+            title = paste(var, "的分布和诊断界限"),
+            subtitle = "蓝色=有效数据",
+            x = var,
+            y = "密度",
+            fill = "数据类型",
+            color = "界限方法"
+        )
+
+    print(p)
+}
+
+# 6. 输出诊断标准表格
+print("眼动指标诊断标准：")
+print(diagnostic_bounds)
+```
+
+## 数据有效性分析
+
+```{r}
+# 计算每个指标的有效和无效数据数量及比例
+validity_analysis <- lapply(variables, function(var) {
+    # 获取对应的有效性列名
+    valid_col <- paste0("valid_", gsub("mean_", "", var))
+
+    # 获取有效和无���数据计数
+    valid_count <- sum(dt_valid[[valid_col]] & !is.na(dt_valid[[var]]))
+    invalid_count <- sum(!dt_valid[[valid_col]] & !is.na(dt_valid[[var]]))
+    total_count <- valid_count + invalid_count
+
+    # 计算百分比
+    valid_pct <- round(valid_count / total_count * 100, 1)
+    invalid_pct <- round(invalid_count / total_count * 100, 1)
+
+    data.frame(
+        指标 = var,
+        有效数据量 = valid_count,
+        无效数据量 = invalid_count,
+        总数据量 = total_count,
+        有效数据比例 = valid_pct,
+        无效数据比例 = invalid_pct
+    )
+})
+
+validity_summary <- do.call(rbind, validity_analysis)
+
+# 打印结果表格
+print("各指标的数据有效性分析：")
+knitr::kable(validity_summary,
+    col.names = c(
+        "指标", "有效数据量", "无效数据量", "总数据量",
+        "有效数据比例(%)", "无效数据比例(%)"
+    ),
+    align = c("l", "r", "r", "r", "r", "r")
+)
+```
+
+## 异常值分析
+
+```{r}
+# 计算每个指标在不同标准下的异常值统计
+outlier_analysis <- lapply(variables, function(var) {
+    # 获取对应的有效性列名
+    valid_col <- paste0("valid_", gsub("mean_", "", var))
+
+    # 仅使用有效数据进行分析
+    valid_data <- dt_valid[[var]][dt_valid[[valid_col]]]
+
+    # 获取该指标的MAD和IQR边界
+    mad_bounds <- diagnostic_bounds %>%
+        filter(Variable == var, Method == "MAD (严格标准)") %>%
+        select(Lower_Bound, Upper_Bound)
+
+    iqr_bounds <- diagnostic_bounds %>%
+        filter(Variable == var, Method == "IQR (宽松标准)") %>%
+        select(Lower_Bound, Upper_Bound)
+
+    # 计算不同标准下的异常值数量
+    mad_outliers <- sum(
+        valid_data < mad_bounds$Lower_Bound |
+            valid_data > mad_bounds$Upper_Bound,
+        na.rm = TRUE
+    )
+
+    iqr_outliers <- sum(
+        valid_data < iqr_bounds$Lower_Bound |
+            valid_data > iqr_bounds$Upper_Bound,
+        na.rm = TRUE
+    )
+
+    total_valid <- sum(!is.na(valid_data))
+
+    # 生成结果数据框
+    data.frame(
+        指标 = var,
+        标准 = c("MAD (严格标准)", "IQR (宽松标准)"),
+        正常值数量 = c(
+            total_valid - mad_outliers,
+            total_valid - iqr_outliers
+        ),
+        异常值数量 = c(mad_outliers, iqr_outliers),
+        总数据量 = total_valid,
+        正常值比例 = round(c(
+            (total_valid - mad_outliers) / total_valid * 100,
+            (total_valid - iqr_outliers) / total_valid * 100
+        ), 1),
+        异常值比例 = round(c(
+            mad_outliers / total_valid * 100,
+            iqr_outliers / total_valid * 100
+        ), 1)
+    )
+})
+
+outlier_summary <- do.call(rbind, outlier_analysis)
+
+# 打印结果表格
+print("各指标的异常值分析：")
+knitr::kable(outlier_summary,
+    col.names = c(
+        "指标", "标准", "正常值数量", "异常值数量", "总数据量",
+        "正常值比例(%)", "异常值比例(%)"
+    ),
+    align = c("l", "l", "r", "r", "r", "r", "r")
+)
+```
+
+# 结果保存
+
+```{r, include=FALSE}
+# 创建结果目录结构
+result_dir <- "data/results/detect_bounds"
+table_dir <- file.path(result_dir, "tables")
+plot_dir <- file.path(result_dir, "plots")
+
+# 创建目录（如果不存在）
+dir.create(table_dir, showWarnings = FALSE, recursive = TRUE)
+dir.create(plot_dir, showWarnings = FALSE, recursive = TRUE)
+
+# 保存表格结果
+# 1. 诊断标准
+write.csv(diagnostic_bounds,
+    file.path(table_dir, "diagnostic_bounds.csv"),
+    row.names = FALSE,
+    fileEncoding = "UTF-8"
+)
+
+# 2. 有效性分析结果
+write.csv(validity_summary,
+    file.path(table_dir, "validity_analysis.csv"),
+    row.names = FALSE,
+    fileEncoding = "UTF-8"
+)
+
+# 3. 异常值分析结果
+write.csv(outlier_summary,
+    file.path(table_dir, "outlier_analysis.csv"),
+    row.names = FALSE,
+    fileEncoding = "UTF-8"
+)
+
+# 保存图片结果
+# 1. 保存每个变量的分布和界限图
+for (var in variables) {
+    # 获取对应的有效性列名
+    valid_col <- paste0("valid_", gsub("mean_", "", var))
+    var_bounds <- subset(diagnostic_bounds, Variable == var)
+
+    # 获取有效数据
+    valid_data <- dt_valid[[var]][dt_valid[[valid_col]]]
+
+    # 计算数据的分位数，用于确定合理的显示范围
+    q1 <- quantile(valid_data, 0.01, na.rm = TRUE)
+    q99 <- quantile(valid_data, 0.99, na.rm = TRUE)
+
+    # 根据变量特性设置x轴范围
+    x_limits <- switch(var,
+        "fixation_count" = c(0, q99 * 1.2),
+        "mean_fixation_duration" = c(0, min(2000, q99 * 1.2)),
+        "mean_saccade_amplitude" = c(0, min(500, q99 * 1.2)),
+        "mean_saccade_angle" = c(-180, 180),
+        "mean_pupil_change_rate" = c(-0.2, 0.2),
+        c(q1 * 1.2, q99 * 1.2) # 默认情况
+    )
+
+    p <- ggplot() +
+        geom_density(
+            data = filter(dt_valid, .data[[valid_col]]),
+            aes(x = .data[[var]], fill = "有效数据"),
+            alpha = 0.3
+        ) +
+        geom_vline(
+            data = var_bounds,
+            aes(
+                xintercept = Lower_Bound,
+                color = Method
+            ),
+            linetype = "dashed"
+        ) +
+        geom_vline(
+            data = var_bounds,
+            aes(
+                xintercept = Upper_Bound,
+                color = Method
+            ),
+            linetype = "dashed"
+        ) +
+        geom_vline(
+            data = var_bounds,
+            aes(
+                xintercept = Center,
+                color = Method
+            )
+        ) +
+        scale_fill_manual(values = c(
+            "有效数据" = "lightblue"
+        )) +
+        scale_color_manual(values = c(
+            "MAD (严格标准)" = "red",
+            "IQR (宽松标准)" = "blue"
+        )) +
+        # 设置x轴范围和刻度
+        scale_x_continuous(
+            limits = x_limits,
+            breaks = scales::pretty_breaks(n = 8),
+            expand = c(0.02, 0)
+        ) +
+        theme_minimal() +
+        theme(
+            plot.title = element_text(size = 14, face = "bold"),
+            axis.title = element_text(size = 12),
+            axis.text = element_text(size = 10),
+            legend.position = "bottom",
+            legend.title = element_text(size = 10),
+            legend.text = element_text(size = 9),
+            panel.grid.minor = element_blank()
+        ) +
+        labs(
+            title = paste(var, "的分布和诊断界限"),
+            subtitle = paste0(
+                "显示范围: [",
+                round(x_limits[1], 2),
+                ", ",
+                round(x_limits[2], 2),
+                "]"
+            ),
+            x = var,
+            y = "密度",
+            fill = "数据类型",
+            color = "界限方法"
+        )
+
+    # 保存图片
+    ggsave(
+        filename = file.path(plot_dir, paste0(var, "_distribution.png")),
+        plot = p,
+        width = 10,
+        height = 6,
+        dpi = 300
+    )
+}
+
+# 创建一个新的 Excel 工作簿
+wb <- createWorkbook()
+
+# 1. 添加诊断标准工作表
+addWorksheet(wb, "诊断标准")
+writeData(wb, "诊断标准", diagnostic_bounds, rowNames = FALSE)
+# 设置列宽
+setColWidths(wb, "诊断标准", cols = 1:5, widths = c(25, 20, 15, 15, 15))
+# 添加表格样式
+addStyle(wb, "诊断标准", createStyle(
+    textDecoration = "bold",
+    halign = "center"
+), rows = 1, cols = 1:5)
+
+# 2. 添加有效性分析工作表
+addWorksheet(wb, "有效性分析")
+writeData(wb, "有效性分析", validity_summary, rowNames = FALSE)
+setColWidths(wb, "有效性分析", cols = 1:6, widths = c(25, 15, 15, 15, 15, 15))
+addStyle(wb, "有效性分析", createStyle(
+    textDecoration = "bold",
+    halign = "center"
+), rows = 1, cols = 1:6)
+
+# 3. 添加异常值分析工作表
+addWorksheet(wb, "异常值分析")
+writeData(wb, "异常值分析", outlier_summary, rowNames = FALSE)
+setColWidths(wb, "异常值分析", cols = 1:7, widths = c(25, 20, 15, 15, 15, 15, 15))
+addStyle(wb, "异常值分析", createStyle(
+    textDecoration = "bold",
+    halign = "center"
+), rows = 1, cols = 1:7)
+
+# 保存 Excel 文件
+saveWorkbook(wb,
+    file.path(table_dir, "eye_tracking_analysis.xlsx"),
+    overwrite = TRUE
+)
+```
+
+# 讨论与建议
+
+## 标准使用建议
+
+1. **分级诊断**：
+   - 使用MAD方法（严格标准）识别明显异常值
+   - 使用IQR方法（宽松标准）识别潜在异常值
+   - 建议先使用宽松标准进行初筛，再用严格标准进行复核
+
+2. **具体应用**：
+   - 对新数据先进行有效性检验
+   - 然后使用这些标准进行异常值检测
+   - 结合具体情况判断是否需要进一步分析
+   - 对于边界情况的数据点，建议进行个案分析
+
+3. **定期更新**：
+   - 建议定期（如每年）使用新数据更新这些标准
+   - 关注标准的稳定性和变化趋势
+   - 建立标准更新的追踪记录系统
+
+## 限制与注意事项
+
+1. **数据局限性**：
+   - 这些标准基于当前数据集，可能需要根据不同群体特征进行调整
+   - 样本量和代表性可能影响标准的稳定性
+
+2. **方法学考虑**：
+   - 异常值不一定表示问题，需要结合具体情况解释
+   - 建议将这些统计标��与专业判断相结合
+   - 考虑实验任务特征对指标的影响
+
+3. **实践建议**：
+   - 建立异常值复核机制
+   - 保存异常值处理的详细记录
+   - 定期评估标准的适用性
+
+# 参考文献
+
+1. Leys, C., et al. (2013). Detecting outliers: Do not use standard deviation around the mean, use absolute deviation around the median. Journal of Experimental Social Psychology, 49(4), 764-766.
+
+2. Tukey, J. W. (1977). Exploratory Data Analysis. Addison-Wesley.
+
+3. Holmqvist, K., et al. (2011). Eye tracking: A comprehensive guide to methods and measures. Oxford University Press.

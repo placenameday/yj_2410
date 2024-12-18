@@ -1,0 +1,468 @@
+---
+title: "基于个体水平的眼动指标异常值检测标准"
+author: "xc"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    number_sections: true
+    theme: united
+    highlight: tango
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+    echo = TRUE,
+    warning = FALSE,
+    message = FALSE,
+    fig.width = 10,
+    fig.height = 6
+)
+```
+
+# 简介
+
+本文档用于建立基于个体水平的眼动指标异常值检测标准。主要步骤：
+1. 首先计算每个被试在所有题目上的平均值
+2. 然后基于这些个体平均值计算诊断标准
+
+## 分析指标
+- **注视点指标**
+  - 注视点个数 (fixation_count)
+  - 平均注视时长 (mean_fixation_duration)
+- **眼跳指标**
+  - 平均眼跳幅度 (mean_saccade_amplitude)
+  - 平均眼跳角度 (mean_saccade_angle)
+- **瞳孔指标**
+  - 平均瞳孔变化率 (mean_pupil_change_rate)
+
+# 加载依赖包
+
+```{r}
+library(tidyverse)
+library(stats)
+library(openxlsx)
+```
+
+# 数据处理和分析
+
+## 数据预处理
+
+```{r}
+# 1. 定义数据有效性检验函数
+validate_metrics <- function(data) {
+    data %>% mutate(
+        valid_fixation_count = fixation_count >= 1,
+        valid_fixation_duration =
+            mean_fixation_duration >= 50 &
+                mean_fixation_duration <= 2000,
+        valid_saccade_amplitude =
+            mean_saccade_amplitude <= 500,
+        valid_saccade_angle =
+            !is.na(mean_saccade_angle),
+        valid_pupil_change_rate =
+            abs(mean_pupil_change_rate) <= 0.2
+    )
+}
+
+# 2. 读取原始数据
+dt_original <- read_csv("data/demo/metrics/combined_question_metrics.csv")
+
+# 3. 进行有效性检验
+dt_valid <- dt_original %>%
+    group_by(Id, QuestionsNum) %>%
+    validate_metrics() %>%
+    ungroup()
+
+# 4. 计算每个被试的平均值
+variables <- c(
+    "fixation_count", "mean_fixation_duration",
+    "mean_saccade_amplitude", "mean_saccade_angle",
+    "mean_pupil_change_rate"
+)
+
+# 计算个体平均值
+subject_means <- dt_valid %>%
+    group_by(Id) %>%
+    summarise(across(
+        all_of(variables),
+        # 只使用有效数据计算平均值
+        ~ {
+            valid_col <- paste0("valid_", gsub("mean_", "", cur_column()))
+            mean(.x[get(valid_col)], na.rm = TRUE)
+        }
+    )) %>%
+    ungroup()
+```
+
+## 异常边界检测
+
+```{r}
+# 1. 定义异常值检测函数（与原函数相同）
+detect_bounds <- function(x, var_name, method = c("mad", "iqr")) {
+    method <- match.arg(method)
+
+    min_values <- list(
+        fixation_count = 1,
+        mean_fixation_duration = 50
+    )
+
+    if (method == "mad") {
+        med <- median(x, na.rm = TRUE)
+        mad_val <- mad(x, na.rm = TRUE)
+        lower <- med - 3 * mad_val
+        upper <- med + 3 * mad_val
+
+        if (var_name %in% names(min_values)) {
+            lower <- max(min_values[[var_name]], lower)
+        }
+
+        list(
+            method = "MAD (严格标准)",
+            lower = lower,
+            upper = upper,
+            center = med
+        )
+    } else {
+        q1 <- quantile(x, 0.25, na.rm = TRUE)
+        q3 <- quantile(x, 0.75, na.rm = TRUE)
+        iqr <- q3 - q1
+        lower <- q1 - 1.5 * iqr
+        upper <- q3 + 1.5 * iqr
+
+        if (var_name %in% names(min_values)) {
+            lower <- max(min_values[[var_name]], lower)
+        }
+
+        list(
+            method = "IQR (宽松标准)",
+            lower = lower,
+            upper = upper,
+            center = median(x, na.rm = TRUE)
+        )
+    }
+}
+
+# 2. 计算基于个体水平的诊断边界
+diagnostic_bounds_by_subject <- lapply(variables, function(var) {
+    # 使用个体平均值计算界限
+    mad_bounds <- detect_bounds(subject_means[[var]], var, "mad")
+    iqr_bounds <- detect_bounds(subject_means[[var]], var, "iqr")
+
+    data.frame(
+        Variable = var,
+        Method = c(mad_bounds$method, iqr_bounds$method),
+        Lower_Bound = c(mad_bounds$lower, iqr_bounds$lower),
+        Upper_Bound = c(mad_bounds$upper, iqr_bounds$upper),
+        Center = c(mad_bounds$center, iqr_bounds$center)
+    )
+})
+
+diagnostic_bounds_by_subject <- do.call(rbind, diagnostic_bounds_by_subject)
+
+# 3. 可视化个体水平的分布和界限
+for (var in variables) {
+    p <- ggplot() +
+        # 个体平均值分布
+        geom_density(
+            data = subject_means,
+            aes(x = .data[[var]], fill = "个体平均值"),
+            alpha = 0.3
+        ) +
+        # 添加界限线
+        geom_vline(
+            data = subset(diagnostic_bounds_by_subject, Variable == var),
+            aes(
+                xintercept = Lower_Bound,
+                color = Method
+            ),
+            linetype = "dashed"
+        ) +
+        geom_vline(
+            data = subset(diagnostic_bounds_by_subject, Variable == var),
+            aes(
+                xintercept = Upper_Bound,
+                color = Method
+            ),
+            linetype = "dashed"
+        ) +
+        geom_vline(
+            data = subset(diagnostic_bounds_by_subject, Variable == var),
+            aes(
+                xintercept = Center,
+                color = Method
+            )
+        ) +
+        scale_fill_manual(values = c(
+            "个体平均值" = "lightblue"
+        )) +
+        scale_color_manual(values = c(
+            "MAD (严格标准)" = "red",
+            "IQR (宽松标准)" = "blue"
+        )) +
+        theme_minimal() +
+        labs(
+            title = paste(var, "的个体水平分布和诊断界限"),
+            subtitle = "基于个体平均值计算",
+            x = var,
+            y = "密度",
+            fill = "数据类型",
+            color = "界限方法"
+        )
+
+    print(p)
+}
+
+# 4. 输出诊断标准表格
+print("基于个体水平的眼动指标诊断标准：")
+print(diagnostic_bounds_by_subject)
+```
+
+## 个体异常值分析
+
+```{r}
+# 计算每个指标异常个体的比例
+outlier_analysis_by_subject <- lapply(variables, function(var) {
+    var_bounds <- subset(diagnostic_bounds_by_subject, Variable == var)
+
+    # 计算在不同标准下的异常个体数量
+    mad_bounds <- var_bounds[var_bounds$Method == "MAD (严格标准)", ]
+    iqr_bounds <- var_bounds[var_bounds$Method == "IQR (宽松标准)", ]
+
+    # 计算异常个体数量
+    mad_outliers <- sum(
+        subject_means[[var]] < mad_bounds$Lower_Bound |
+            subject_means[[var]] > mad_bounds$Upper_Bound,
+        na.rm = TRUE
+    )
+
+    iqr_outliers <- sum(
+        subject_means[[var]] < iqr_bounds$Lower_Bound |
+            subject_means[[var]] > iqr_bounds$Upper_Bound,
+        na.rm = TRUE
+    )
+
+    total_subjects <- sum(!is.na(subject_means[[var]]))
+
+    data.frame(
+        指标 = var,
+        标准 = c("MAD (严格标准)", "IQR (宽松标准)"),
+        正常个体数 = c(
+            total_subjects - mad_outliers,
+            total_subjects - iqr_outliers
+        ),
+        异常个体数 = c(mad_outliers, iqr_outliers),
+        总个体数 = total_subjects,
+        正常个体比例 = round(c(
+            (total_subjects - mad_outliers) / total_subjects * 100,
+            (total_subjects - iqr_outliers) / total_subjects * 100
+        ), 1),
+        异常个体比例 = round(c(
+            mad_outliers / total_subjects * 100,
+            iqr_outliers / total_subjects * 100
+        ), 1)
+    )
+})
+
+outlier_summary_by_subject <- do.call(rbind, outlier_analysis_by_subject)
+
+# 打印结果表格
+print("基于个体水平的异常值分析：")
+knitr::kable(outlier_summary_by_subject,
+    col.names = c(
+        "指标", "标准", "正常个体数", "异常个体数", "总��体数",
+        "正常个体比例(%)", "异常个体比例(%)"
+    ),
+    align = c("l", "l", "r", "r", "r", "r", "r")
+)
+```
+
+# 结果保存
+
+```{r}
+# 创建结果目录结构
+result_dir <- "data/results/detect_bounds_by_subject"
+table_dir <- file.path(result_dir, "tables")
+plot_dir <- file.path(result_dir, "plots")
+
+# 创建目录（如果不存在）
+dir.create(table_dir, showWarnings = FALSE, recursive = TRUE)
+dir.create(plot_dir, showWarnings = FALSE, recursive = TRUE)
+
+# 保存表格结果
+# 1. 诊断标准
+write.csv(diagnostic_bounds_by_subject,
+    file.path(table_dir, "diagnostic_bounds_by_subject.csv"),
+    row.names = FALSE,
+    fileEncoding = "UTF-8"
+)
+
+# 2. 异常值分析结果
+write.csv(outlier_summary_by_subject,
+    file.path(table_dir, "outlier_analysis_by_subject.csv"),
+    row.names = FALSE,
+    fileEncoding = "UTF-8"
+)
+
+# 创建一个新的 Excel 工作簿
+wb <- createWorkbook()
+
+# 1. 添加诊断标准工作表
+addWorksheet(wb, "诊断标准")
+writeData(wb, "诊断标准", diagnostic_bounds_by_subject, rowNames = FALSE)
+setColWidths(wb, "诊断标准", cols = 1:5, widths = c(25, 20, 15, 15, 15))
+addStyle(wb, "诊断标准", createStyle(
+    textDecoration = "bold",
+    halign = "center"
+), rows = 1, cols = 1:5)
+
+# 2. 添加异常值分析工作表
+addWorksheet(wb, "异常值分析")
+writeData(wb, "异常值分析", outlier_summary_by_subject, rowNames = FALSE)
+setColWidths(wb, "异常值分析", cols = 1:7, widths = c(25, 20, 15, 15, 15, 15, 15))
+addStyle(wb, "异常值分析", createStyle(
+    textDecoration = "bold",
+    halign = "center"
+), rows = 1, cols = 1:7)
+
+# 保存 Excel 文件
+saveWorkbook(wb,
+    file.path(table_dir, "individual_level_analysis.xlsx"),
+    overwrite = TRUE
+)
+
+# 保存图片结果
+# 1. 保存每个变量的分布和界限图
+for (var in variables) {
+    # 获取对应的有效性列名
+    valid_col <- paste0("valid_", gsub("mean_", "", var))
+    var_bounds <- subset(diagnostic_bounds_by_subject, Variable == var)
+
+    # 获取有效数据
+    valid_data <- subject_means[[var]]
+
+    # 计算数据的分位数，用于确定合理的显示范围
+    q1 <- quantile(valid_data, 0.01, na.rm = TRUE)
+    q99 <- quantile(valid_data, 0.99, na.rm = TRUE)
+
+    # 根据变量特性设置x轴范围
+    x_limits <- switch(var,
+        "fixation_count" = c(0, q99 * 1.2),
+        "mean_fixation_duration" = c(0, min(2000, q99 * 1.2)),
+        "mean_saccade_amplitude" = c(0, min(500, q99 * 1.2)),
+        "mean_saccade_angle" = c(-180, 180),
+        "mean_pupil_change_rate" = c(-0.2, 0.2),
+        c(q1 * 1.2, q99 * 1.2) # 默认情况
+    )
+
+    p <- ggplot() +
+        geom_density(
+            data = data.frame(x = valid_data),
+            aes(x = x, fill = "有效数据"),
+            alpha = 0.3
+        ) +
+        geom_vline(
+            data = var_bounds,
+            aes(
+                xintercept = Lower_Bound,
+                color = Method
+            ),
+            linetype = "dashed"
+        ) +
+        geom_vline(
+            data = var_bounds,
+            aes(
+                xintercept = Upper_Bound,
+                color = Method
+            ),
+            linetype = "dashed"
+        ) +
+        geom_vline(
+            data = var_bounds,
+            aes(
+                xintercept = Center,
+                color = Method
+            )
+        ) +
+        scale_fill_manual(values = c(
+            "有效数据" = "lightblue"
+        )) +
+        scale_color_manual(values = c(
+            "MAD (严格标准)" = "red",
+            "IQR (宽松标准)" = "blue"
+        )) +
+        scale_x_continuous(
+            limits = x_limits,
+            breaks = scales::pretty_breaks(n = 8),
+            expand = c(0.02, 0)
+        ) +
+        theme_minimal() +
+        theme(
+            plot.title = element_text(size = 14, face = "bold"),
+            axis.title = element_text(size = 12),
+            axis.text = element_text(size = 10),
+            legend.position = "bottom",
+            legend.title = element_text(size = 10),
+            legend.text = element_text(size = 9),
+            panel.grid.minor = element_blank()
+        ) +
+        labs(
+            title = paste(var, "的个体水平分布和诊断界限"),
+            subtitle = paste0(
+                "显示范围: [",
+                round(x_limits[1], 2),
+                ", ",
+                round(x_limits[2], 2),
+                "]"
+            ),
+            x = var,
+            y = "密度",
+            fill = "数据类型",
+            color = "界限方法"
+        )
+
+    # 保存图片
+    ggsave(
+        filename = file.path(plot_dir, paste0(var, "_distribution_by_subject.png")),
+        plot = p,
+        width = 10,
+        height = 6,
+        dpi = 300
+    )
+}
+```
+
+# 讨论与建议
+
+## 个体水平分析的意义
+
+1. **更准确的个体差异评估**：
+   - 基于个体平均值的标准能更好地反映个体间的差异
+   - 避免了单次任务波动带来的影响
+
+2. **应用建议**：
+   - 可用于识别具有异常眼动模式的个体
+   - 适合用于被试筛选和质量控制
+   - 建议与任务水平的标准结合使用
+
+## 局限性
+
+1. **样本依赖**：
+   - 标准的准确性依赖于样本的代表性
+   - 需要足够大的样本量来保证可靠性
+
+2. **平均化效应**：
+   - 个体平均值可能掩盖任务特定的变异
+   - 需要考虑个体内部变异的影响
+
+## 未来改进方向
+
+1. **分层分析**：
+   - 考虑按照人口统计特征分层
+   - 建立更��细的群体特异性标准
+
+2. **纵向追踪**：
+   - 建立个体水平的纵向变化标准
+   - 评估个体指标的稳定性 

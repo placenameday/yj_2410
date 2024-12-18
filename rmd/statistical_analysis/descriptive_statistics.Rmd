@@ -1,0 +1,309 @@
+---
+title: "眼动指标描述性统计分析"
+author: "xc"
+date: "2024-12-17"
+output:
+  html_document:
+    highlight: tango
+    toc: true
+    toc_float: true
+  pdf_document: default
+---
+
+## 设置代码块的全局选项:
+```{r setup, include=FALSE}
+# 设置代码块的全局选项:
+# echo = TRUE: 在输出中显示代码
+# warning = FALSE: 不显示警告信息
+# message = FALSE: 不显示消息提示
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+## 简介
+
+本文档用于对眼动实验的各项指标进行描述性统计分析。主要包括：
+
+### 分析指标
+- **注视点指标**
+  - 注视点个数
+  - 平均注视时长
+- **眼跳指标**
+  - 平均眼跳幅度
+  - 平均眼跳角度
+- **瞳孔指标**
+  - 平均瞳孔变化率
+
+### 统计内容
+- 集中趋势（均值、中位数）
+- 离散程度（标准差、四分位数）
+- 分布特征（偏度、峰度）
+- 可视化图表
+
+### 数据粒度
+- 题目级别
+- 被试级别
+
+## 加载依赖包
+
+```{r}
+# 加载包
+library(tidyverse)
+library(psych) # 用于描述性统计
+library(ggplot2) # 用于数据可视化
+library(glue) # 用于字符串处理
+```
+
+## 数据读取
+
+```{r}
+# 读取数据
+dt <- read_csv("data/demo/metrics/combined_question_metrics.csv")
+
+# 显示数据结构
+str(dt)
+```
+
+## 剔除极端数据
+
+```{r}
+# 定义剔除极端值的函数
+remove_outliers_flag <- function(x) {
+    Q1 <- quantile(x, 0.25, na.rm = TRUE)
+    Q3 <- quantile(x, 0.75, na.rm = TRUE)
+    IQR <- Q3 - Q1
+    lower_bound <- Q1 - 1.5 * IQR
+    upper_bound <- Q3 + 1.5 * IQR
+    ifelse(x < lower_bound | x > upper_bound, NA, x)
+}
+
+# 对每个指标剔除极端值（标记为 NA）
+dt_clean <- dt %>%
+    mutate(
+        # 直接替换原变量
+        fixation_count = remove_outliers_flag(fixation_count),
+        mean_fixation_duration = remove_outliers_flag(mean_fixation_duration),
+        mean_saccade_amplitude = remove_outliers_flag(mean_saccade_amplitude),
+        mean_saccade_angle = remove_outliers_flag(mean_saccade_angle),
+        mean_pupil_change_rate = remove_outliers_flag(mean_pupil_change_rate)
+    )
+
+# 检查清理后的数据
+summary(dt_clean)
+```
+
+## 检验各个指标的分布
+
+```{r}
+# 检验各个指标的分布
+# 绘制指标的分布密度图
+dt_clean %>%
+    pivot_longer(
+        cols = c(fixation_count, mean_fixation_duration, mean_saccade_amplitude, mean_saccade_angle, mean_pupil_change_rate),
+        names_to = "Metric", values_to = "Value"
+    ) %>%
+    ggplot(aes(x = Value)) +
+    geom_density(fill = "blue", alpha = 0.3) +
+    facet_wrap(~Metric, scales = "free") +
+    theme_minimal() +
+    labs(title = "各指标分布密度图", x = "值", y = "密度")
+
+# 随机抽样不超过 5000 个样本进行 Shapiro-Wilk 检验
+shapiro_test_safe <- function(x) {
+    if (length(x) > 5000) {
+        x <- sample(x, 5000) # 随机抽取 5000 个样本
+    }
+    shapiro.test(x)$p.value
+}
+
+# 针对多个变量进行批量正态性检验
+normality_tests <- dt_clean %>%
+    summarise(
+        fixation_count_p = shapiro_test_safe(fixation_count),
+        mean_fixation_duration_p = shapiro_test_safe(mean_fixation_duration),
+        mean_saccade_amplitude_p = shapiro_test_safe(mean_saccade_amplitude),
+        mean_saccade_angle_p = shapiro_test_safe(mean_saccade_angle),
+        mean_pupil_change_rate_p = shapiro_test_safe(mean_pupil_change_rate)
+    )
+
+print(normality_tests)
+```
+
+## 尝试不同的转换方法，进行正态性检验
+
+```{r}
+# 定义多种转换方法的函数
+try_transform <- function(x) {
+    # 处理负值
+    has_neg <- any(x < 0, na.rm = TRUE)
+
+    # 如果有负值，将数据平移到正值
+    if (has_neg) {
+        shift <- abs(min(x, na.rm = TRUE)) + 1
+        x <- x + shift
+    }
+
+    # 尝试不同的转换方法
+    transforms <- list(
+        original = x,
+        log = log(x),
+        sqrt = sqrt(x),
+        inverse = 1 / x,
+        squared = x^2,
+        cube_root = sign(x) * abs(x)^(1 / 3) # 可以处理负值的三次方根
+    )
+
+    # 计算每种转换后的偏度和峰度
+    results <- sapply(transforms, function(trans) {
+        if (any(is.infinite(trans)) || any(is.nan(trans))) {
+            return(c(skew = Inf, kurt = Inf, sw_p = 0))
+        }
+        c(
+            skew = abs(psych::skew(trans, na.rm = TRUE)), # 偏度绝对值
+            kurt = abs(psych::kurtosi(trans, na.rm = TRUE)), # 峰度绝对值
+            sw_p = shapiro_test_safe(trans) # Shapiro-Wilk p值
+        )
+    })
+
+    # 找出最佳转换（基于偏度、峰度和正态性检验）
+    scores <- apply(results, 2, function(x) sum(scale(x)))
+    best_transform <- names(transforms)[which.min(scores)]
+
+    # 返回最佳转换结果
+    list(
+        transformed_data = transforms[[best_transform]],
+        method = best_transform,
+        metrics = results
+    )
+}
+
+# 对每个变量进行转换
+variables <- c(
+    "fixation_count", "mean_fixation_duration",
+    "mean_saccade_amplitude", "mean_saccade_angle",
+    "mean_pupil_change_rate"
+)
+
+# 存储转换结果
+transformation_results <- list()
+dt_transformed <- dt_clean
+
+# 对每个变量尝试转换并选择最佳方法
+for (var in variables) {
+    result <- try_transform(dt_clean[[var]])
+    transformation_results[[var]] <- result
+
+    # 添加转换后的数据到数据框
+    dt_transformed[[paste0(var, "_transformed")]] <- result$transformed_data
+}
+
+# 显示每个变量的最佳转换方法
+best_methods <- sapply(transformation_results, function(x) x$method)
+print("最佳转换方法：")
+print(best_methods)
+
+# 可视化转换前后的分布
+par(mfrow = c(2, 3))
+for (var in variables) {
+    # 原始数据密度图
+    orig_data <- dt_clean[[var]]
+    trans_data <- dt_transformed[[paste0(var, "_transformed")]]
+
+    # 创建转换前后的对比图
+    data_for_plot <- data.frame(
+        Value = c(scale(orig_data), scale(trans_data)),
+        Type = rep(c("Original", "Transformed"), each = length(orig_data))
+    )
+
+    ggplot(data_for_plot, aes(x = Value, fill = Type)) +
+        geom_density(alpha = 0.5) +
+        ggtitle(paste0(var, "\n(", best_methods[var], " transform)")) +
+        theme_minimal()
+}
+
+# 显示转换后的正态性检验结果
+normality_results <- data.frame(
+    Variable = variables,
+    Original_SW_p = sapply(variables, function(var) {
+        shapiro_test_safe(dt_clean[[var]])
+    }),
+    Transformed_SW_p = sapply(variables, function(var) {
+        shapiro_test_safe(dt_transformed[[paste0(var, "_transformed")]])
+    })
+)
+
+print("正态性检验结果（p值）：")
+print(normality_results)
+```
+
+## 分析集中趋势
+
+```{r}
+# 针对5个指标（fixation_count, mean_fixation_duration, mean_saccade_amplitude, mean_saccade_angle, mean_pupil_change_rate）
+# 计算每道题目的平均值和中位数
+# 计算每道题目的均值和中位数
+central_tendency <- dt %>%
+    group_by(QuestionsNum) %>%
+    summarise(
+        # 注视点指标
+        mean_fixation_count = mean(fixation_count, na.rm = TRUE),
+        median_fixation_count = median(fixation_count, na.rm = TRUE),
+        mean_fixation_duration = mean(mean_fixation_duration, na.rm = TRUE),
+        median_fixation_duration = median(mean_fixation_duration, na.rm = TRUE),
+
+        # 眼跳指标
+        mean_saccade_amplitude = mean(mean_saccade_amplitude, na.rm = TRUE),
+        median_saccade_amplitude = median(mean_saccade_amplitude, na.rm = TRUE),
+        mean_saccade_angle = mean(mean_saccade_angle, na.rm = TRUE),
+        median_saccade_angle = median(mean_saccade_angle, na.rm = TRUE),
+
+        # 瞳孔指标
+        mean_pupil_change = mean(mean_pupil_change_rate, na.rm = TRUE),
+        median_pupil_change = median(mean_pupil_change_rate, na.rm = TRUE)
+    )
+
+# 显示结果
+print(central_tendency)
+```
+
+## 分析离散程度
+
+```{r}
+# 计算每道题目的标准差和四分位数
+dispersion <- dt %>%
+    group_by(QuestionsNum) %>%
+    summarise(
+        # 注视点个数的离散程度
+        sd_fixation_count = sd(fixation_count, na.rm = TRUE), # 标准差
+        q1_fixation_count = quantile(fixation_count, 0.25, na.rm = TRUE), # 第一四分位数
+        q3_fixation_count = quantile(fixation_count, 0.75, na.rm = TRUE), # 第三四分位数
+
+        # 注视时长的离散程度
+        sd_mean_fixation_duration = sd(mean_fixation_duration, na.rm = TRUE), # 标准差
+        q1_mean_fixation_duration = quantile(mean_fixation_duration, 0.25, na.rm = TRUE), # 第一四分位数
+        q3_mean_fixation_duration = quantile(mean_fixation_duration, 0.75, na.rm = TRUE), # 第三四分位数
+
+        # 眼跳幅度的离散程度
+        sd_mean_saccade_amplitude = sd(mean_saccade_amplitude, na.rm = TRUE), # 标准差
+        q1_mean_saccade_amplitude = quantile(mean_saccade_amplitude, 0.25, na.rm = TRUE), # 第一四分位数
+        q3_mean_saccade_amplitude = quantile(mean_saccade_amplitude, 0.75, na.rm = TRUE), # 第三四分位数
+
+        # 眼跳角度的离散程度
+        sd_mean_saccade_angle = sd(mean_saccade_angle, na.rm = TRUE), # 标准差
+        q1_mean_saccade_angle = quantile(mean_saccade_angle, 0.25, na.rm = TRUE), # 第一四分位数
+        q3_mean_saccade_angle = quantile(mean_saccade_angle, 0.75, na.rm = TRUE), # 第三四分位数
+
+        # 瞳孔变化率的离散程度
+        sd_mean_pupil_change = sd(mean_pupil_change_rate, na.rm = TRUE), # 标准差
+        q1_mean_pupil_change = quantile(mean_pupil_change_rate, 0.25, na.rm = TRUE), # 第一四分位数
+        q3_mean_pupil_change = quantile(mean_pupil_change_rate, 0.75, na.rm = TRUE) # 第三四分位数
+    )
+
+# 显示结果
+print(dispersion)
+```
+
+## 合并保存分析结果
+
+```{r}
+# 合并保存分析
+```
