@@ -1,0 +1,643 @@
+---
+title: "基于参数检验的眼动指标题目级异常值检测标准"
+author: "xc"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    number_sections: true
+    theme: united
+    highlight: tango
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+    echo = TRUE,
+    warning = FALSE,
+    message = FALSE,
+    fig.width = 10,
+    fig.height = 6
+)
+```
+
+# 简介
+
+本文档使用参数检验方法（均值±2.5个标准差）建立每个题目的眼动指标异常值检测标准。主要步骤：
+1. 对每个题目的原始数据进行极端值剔除
+2. 计算每个题目剔除后数据的均值和标准差
+3. 基于均值±2.5SD为每个题目设定诊断标准
+
+## 分析指标
+- **注视点指标**
+  - 注视点个数 (fixation_count)
+  - 平均注视时长 (mean_fixation_duration)
+- **眼跳指标**
+  - 平均眼跳幅度 (mean_saccade_amplitude)
+  - 平均眼跳角度 (mean_saccade_angle)
+- **瞳孔指标**
+  - 平均瞳孔变化率 (mean_pupil_change_rate)
+
+# 加载依赖包
+
+```{r}
+library(tidyverse)
+library(stats)
+library(openxlsx)
+library(gridExtra) # 用于组合多个图形
+library(grid) # 用于创建文本标题
+library(cowplot) # 用于提取图例
+```
+
+# 数据处理和分析
+
+## 数据预处理
+
+```{r}
+# 1. 读原始数据
+dt_original <- read_csv("data/demo/metrics/combined_question_metrics.csv")
+
+# 2. 定义数据有效性检验函数
+validate_metrics <- function(data) {
+    data %>% mutate(
+        valid_fixation_count = fixation_count >= 1,
+        valid_fixation_duration =
+            mean_fixation_duration >= 50 &
+                mean_fixation_duration <= 2000,
+        valid_saccade_amplitude =
+            mean_saccade_amplitude <= 500,
+        valid_saccade_angle =
+            !is.na(mean_saccade_angle),
+        valid_pupil_change_rate =
+            abs(mean_pupil_change_rate) <= 0.2
+    )
+}
+
+# 3. 进行有效性检验
+dt_valid <- dt_original %>%
+    group_by(Id, QuestionsNum) %>%
+    validate_metrics() %>%
+    ungroup()
+
+# 4. 定义分析变量
+variables <- c(
+    "fixation_count", "mean_fixation_duration",
+    "mean_saccade_amplitude", "mean_saccade_angle",
+    "mean_pupil_change_rate"
+)
+```
+
+## 极端值剔除和诊断标准计算
+
+```{r}
+# 1. 极端值剔除函数
+remove_outliers <- function(x, k = 2.5) {
+    median_x <- median(x, na.rm = TRUE)
+    mad_x <- mad(x, constant = 1.4826, na.rm = TRUE)
+    lower <- median_x - k * mad_x
+    upper <- median_x + k * mad_x
+    x[x < lower | x > upper] <- NA
+    return(x)
+}
+
+# 2. 诊断界限计算函数
+calculate_bounds <- function(x, var_name) {
+    # 设定最小值限制
+    min_values <- list(
+        fixation_count = 1,
+        mean_fixation_duration = 50
+    )
+
+    # 计算基本统计量
+    mean_x <- mean(x, na.rm = TRUE)
+    sd_x <- sd(x, na.rm = TRUE)
+
+    # 计算界限
+    lower <- mean_x - 2.5 * sd_x
+    upper <- mean_x + 2.5 * sd_x
+
+    # 应用最小值限制
+    if (var_name %in% names(min_values)) {
+        lower <- max(min_values[[var_name]], lower)
+    }
+
+    # 返回结果
+    data.frame(
+        Variable = var_name,
+        Mean = mean_x,
+        SD = sd_x,
+        Lower_Bound = lower,
+        Upper_Bound = upper
+    )
+}
+
+# 3. 对每个题目的每个变量计算诊断标准
+diagnostic_bounds_by_question <- dt_valid %>%
+    group_by(QuestionsNum) %>%
+    group_modify(~ {
+        map_df(variables, function(var) {
+            # 获取有效数据
+            valid_col <- paste0("valid_", gsub("mean_", "", var))
+            data <- .x[[var]][.x[[valid_col]]]
+
+            # 剔除极端值
+            cleaned_data <- remove_outliers(data)
+
+            # 计算诊断标准
+            bounds <- calculate_bounds(cleaned_data, var)
+
+            # 计算样本量信息
+            n_total <- sum(!is.na(data))
+            n_removed <- sum(is.na(cleaned_data)) - sum(is.na(data))
+            n_final <- sum(!is.na(cleaned_data))
+
+            # 添加样本量信息
+            bounds$N_Total <- n_total
+            bounds$N_Removed <- n_removed
+            bounds$N_Final <- n_final
+            bounds$Removed_Percent <- round(n_removed / n_total * 100, 2)
+
+            return(bounds)
+        })
+    }) %>%
+    ungroup()
+```
+
+## 异常值分析
+
+```{r}
+# 计算每个题目每个指标的异常值统计
+outlier_analysis_by_question <- dt_valid %>%
+    group_by(QuestionsNum) %>%
+    group_modify(~ {
+        map_df(variables, function(var) {
+            # 获取有效数据
+            valid_col <- paste0("valid_", gsub("mean_", "", var))
+            data <- .x[[var]][.x[[valid_col]]]
+
+            # 获取诊断界限
+            bounds <- diagnostic_bounds_by_question %>%
+                filter(QuestionsNum == .y$QuestionsNum, Variable == var)
+
+            # 计算异常值数量
+            n_total <- sum(!is.na(data))
+            n_outliers <- sum(data < bounds$Lower_Bound |
+                data > bounds$Upper_Bound, na.rm = TRUE)
+            n_normal <- n_total - n_outliers
+
+            data.frame(
+                Variable = var,
+                正常人数 = n_normal,
+                异常人数 = n_outliers,
+                总人数 = n_total,
+                正常比例 = round(n_normal / n_total * 100, 1),
+                异常比例 = round(n_outliers / n_total * 100, 1)
+            )
+        })
+    }) %>%
+    ungroup()
+```
+
+## 可视化分析
+
+```{r}
+# 为每个变量创建分布图集
+create_distribution_plots <- function(var_name) {
+    plots_list <- dt_valid %>%
+        group_by(QuestionsNum) %>%
+        group_map(function(.x, .y) {
+            # 获取数据
+            valid_col <- paste0("valid_", gsub("mean_", "", var_name))
+            original_data <- .x[[var_name]][.x[[valid_col]]]
+            cleaned_data <- remove_outliers(original_data)
+
+            # 获取界限
+            bounds <- diagnostic_bounds_by_question %>%
+                filter(QuestionsNum == .y$QuestionsNum, Variable == var_name)
+
+            # 创建密度图
+            ggplot() +
+                geom_density(
+                    data = data.frame(x = original_data),
+                    aes(x = x, fill = "原始数据"),
+                    alpha = 0.3
+                ) +
+                geom_density(
+                    data = data.frame(x = cleaned_data),
+                    aes(x = x, fill = "清洗后数据"),
+                    alpha = 0.3
+                ) +
+                geom_vline(
+                    xintercept = bounds$Lower_Bound,
+                    color = "red",
+                    linetype = "dashed"
+                ) +
+                geom_vline(
+                    xintercept = bounds$Upper_Bound,
+                    color = "red",
+                    linetype = "dashed"
+                ) +
+                geom_vline(
+                    xintercept = bounds$Mean,
+                    color = "blue"
+                ) +
+                scale_fill_manual(values = c(
+                    "原始数据" = "lightblue",
+                    "清洗后数据" = "lightgreen"
+                )) +
+                theme_minimal() +
+                theme(legend.position = "none") +
+                labs(
+                    title = paste("题目", .y$QuestionsNum),
+                    subtitle = paste0(
+                        "N=", bounds$N_Final,
+                        " (剔除", bounds$Removed_Percent, "%)"
+                    ),
+                    x = var_name,
+                    y = "密度"
+                )
+        })
+
+    # 组合图形
+    grid_plot <- arrangeGrob(
+        grobs = plots_list,
+        ncol = 3,
+        top = textGrob(
+            paste(var_name, "分布 (页", page, "/", n_pages, ")"),
+            gp = gpar(fontsize = 12, fontface = "bold")
+        )
+    )
+
+    return(grid_plot)
+}
+```
+
+# 结果保存
+
+```{r}
+# 创建结果目录
+result_dir <- "data/results/detect_bounds_parametric_by_question"
+table_dir <- file.path(result_dir, "tables")
+plot_dir <- file.path(result_dir, "plots")
+
+# 为每个变量创建单独的图片目录
+for (var in variables) {
+    dir.create(file.path(plot_dir, var),
+        showWarnings = FALSE,
+        recursive = TRUE
+    )
+}
+
+dir.create(table_dir, showWarnings = FALSE, recursive = TRUE)
+
+# 1. 保存诊断标准
+# CSV格式
+write.csv(diagnostic_bounds_by_question,
+    file.path(table_dir, "diagnostic_bounds.csv"),
+    row.names = FALSE,
+    fileEncoding = "UTF-8"
+)
+
+# Excel格式
+wb <- createWorkbook()
+
+# 添加诊断标准工作表
+addWorksheet(wb, "诊断标准")
+writeData(wb, "诊断标准", diagnostic_bounds_by_question)
+setColWidths(wb, "诊断标准", cols = 1:ncol(diagnostic_bounds_by_question), widths = "auto")
+
+# 设置格式
+headerStyle <- createStyle(
+    textDecoration = "bold",
+    border = "bottom",
+    fgFill = "#E0E0E0"
+)
+addStyle(wb, "诊断标准", headerStyle, rows = 1, cols = 1:ncol(diagnostic_bounds_by_question))
+
+# 2. 保存异常值分析结果
+# CSV格式
+write.csv(outlier_analysis_by_question,
+    file.path(table_dir, "outlier_analysis.csv"),
+    row.names = FALSE,
+    fileEncoding = "UTF-8"
+)
+
+# Excel格式 - 添加异常值分析工作表
+addWorksheet(wb, "异常值分析")
+writeData(wb, "异常值分析", outlier_analysis_by_question)
+setColWidths(wb, "异常值分析", cols = 1:ncol(outlier_analysis_by_question), widths = "auto")
+addStyle(wb, "异常值分析", headerStyle, rows = 1, cols = 1:ncol(outlier_analysis_by_question))
+
+# 保存Excel文件
+saveWorkbook(wb,
+    file.path(table_dir, "analysis_results.xlsx"),
+    overwrite = TRUE
+)
+
+# 3. 保存分布图
+for (var in variables) {
+    # 获取排序后的题目列表
+    questions <- sort(unique(dt_valid$QuestionsNum))
+    n_questions <- length(questions)
+    n_pages <- ceiling(n_questions / 9)
+
+    for (page in 1:n_pages) {
+        start_idx <- (page - 1) * 9 + 1
+        end_idx <- min(page * 9, n_questions)
+        current_questions <- questions[start_idx:end_idx]
+
+        # 计算当前9个题目的有效数据范围
+        current_ranges <- dt_valid %>%
+            filter(QuestionsNum %in% current_questions) %>%
+            group_by(QuestionsNum) %>%
+            summarise(
+                # 对amplitude使用更严格的截断
+                q1 = if (var == "mean_saccade_amplitude") {
+                    quantile(!!sym(var), 0.05, na.rm = TRUE) # 5%分位数
+                } else {
+                    quantile(!!sym(var), 0.01, na.rm = TRUE) # 1%分位数
+                },
+                q99 = if (var == "mean_saccade_amplitude") {
+                    quantile(!!sym(var), 0.95, na.rm = TRUE) # 95%分位数
+                } else {
+                    quantile(!!sym(var), 0.99, na.rm = TRUE) # 99%分位数
+                }
+            ) %>%
+            summarise(
+                min_val = min(q1, na.rm = TRUE),
+                max_val = max(q99, na.rm = TRUE)
+            )
+
+        # 计算当前9个题目的密度范围（基于截断数据）
+        density_ranges <- map_dfr(current_questions, function(q) {
+            question_data <- dt_valid %>%
+                filter(QuestionsNum == q)
+
+            valid_col <- paste0("valid_", gsub("mean_", "", var))
+            data <- question_data[[var]][question_data[[valid_col]]]
+
+            # 截断数据到1%和99%分位数范围内
+            q1 <- quantile(data, 0.01, na.rm = TRUE)
+            q99 <- quantile(data, 0.99, na.rm = TRUE)
+            truncated_data <- data[data >= q1 & data <= q99]
+            cleaned_truncated_data <- remove_outliers(truncated_data)
+
+            # 计算密度
+            d1 <- density(truncated_data, na.rm = TRUE)
+            d2 <- density(cleaned_truncated_data, na.rm = TRUE)
+
+            data.frame(
+                max_density = max(c(d1$y, d2$y))
+            )
+        }) %>%
+            summarise(max_density = max(max_density))
+
+        # 创建当前页的所有图
+        current_plots <- map(current_questions, function(q) {
+            # 获取数据
+            question_data <- dt_valid %>%
+                filter(QuestionsNum == q)
+
+            valid_col <- paste0("valid_", gsub("mean_", "", var))
+            original_data <- question_data[[var]][question_data[[valid_col]]]
+            cleaned_data <- remove_outliers(original_data)
+
+            # 获取界限
+            bounds <- diagnostic_bounds_by_question %>%
+                filter(QuestionsNum == q, Variable == var)
+
+            # 计算显示范围
+            q1 <- quantile(original_data, 0.01, na.rm = TRUE)
+            q99 <- quantile(original_data, 0.99, na.rm = TRUE)
+
+            # 计算异常比例
+            outlier_stats <- outlier_analysis_by_question %>%
+                filter(QuestionsNum == q, Variable == var)
+
+            # 确定图片位置
+            is_bottom_row <- which(current_questions == q) > length(current_questions) - 3
+            is_left_column <- which(current_questions == q) %% 3 == 1
+
+            # 创建密度图
+            p <- ggplot() +
+                # 基本图层保持不变
+                geom_density(
+                    data = data.frame(x = original_data),
+                    aes(x = x, fill = "原始数据"),
+                    alpha = 0.3,
+                    trim = TRUE
+                ) +
+                geom_density(
+                    data = data.frame(x = cleaned_data),
+                    aes(x = x, fill = "清洗后数据"),
+                    alpha = 0.3,
+                    trim = TRUE
+                ) +
+                geom_vline(
+                    xintercept = bounds$Lower_Bound,
+                    color = "red",
+                    linetype = "dashed",
+                    aes(linetype = "诊断界限")
+                ) +
+                geom_vline(
+                    xintercept = bounds$Upper_Bound,
+                    color = "red",
+                    linetype = "dashed"
+                ) +
+                geom_vline(
+                    xintercept = bounds$Mean,
+                    color = "blue",
+                    aes(color = "均值")
+                ) +
+                # 界限值标注
+                annotate(
+                    "text",
+                    x = bounds$Lower_Bound,
+                    y = density_ranges$max_density,
+                    label = sprintf("%.2f", bounds$Lower_Bound),
+                    color = "red",
+                    size = 3.5,
+                    vjust = 1,
+                    hjust = 1.2
+                ) +
+                annotate(
+                    "text",
+                    x = bounds$Upper_Bound,
+                    y = density_ranges$max_density,
+                    label = sprintf("%.2f", bounds$Upper_Bound),
+                    color = "red",
+                    size = 3.5,
+                    vjust = 1,
+                    hjust = -0.2
+                ) +
+                annotate(
+                    "text",
+                    x = bounds$Mean,
+                    y = density_ranges$max_density * 0.9,
+                    label = sprintf("%.2f", bounds$Mean),
+                    color = "blue",
+                    size = 3.5,
+                    vjust = 1,
+                    hjust = -0.2
+                ) +
+                scale_fill_manual(
+                    name = "数据分布",
+                    values = c(
+                        "原始数据" = "lightblue",
+                        "清洗后数据" = "lightgreen"
+                    )
+                ) +
+                scale_color_manual(
+                    name = "参考线",
+                    values = c("均值" = "blue")
+                ) +
+                scale_linetype_manual(
+                    name = "参考线",
+                    values = c("诊断界限" = "dashed")
+                ) +
+                # 使用截断的数据范围
+                scale_x_continuous(
+                    limits = c(current_ranges$min_val, current_ranges$max_val),
+                    expand = expansion(mult = c(0.05, 0.05))
+                ) +
+                scale_y_continuous(
+                    limits = c(0, density_ranges$max_density),
+                    expand = expansion(mult = c(0, 0.05))
+                ) +
+                theme_minimal() +
+                theme(
+                    # 增大轴标签和刻度的字号
+                    axis.title.x = element_text(size = 10, margin = margin(t = 10)),
+                    axis.title.y = element_text(size = 10, margin = margin(r = 10)),
+                    axis.text.x = if (is_bottom_row) element_text(size = 9) else element_blank(),
+                    axis.text.y = if (is_left_column) element_text(size = 9) else element_blank(),
+                    # 其他主题设置
+                    plot.title = element_text(size = 10),
+                    plot.subtitle = element_text(size = 8),
+                    legend.position = "none",
+                    plot.margin = unit(c(1, 1, 1, 1), "mm")
+                ) +
+                labs(
+                    title = paste("题目", q),
+                    subtitle = paste0(
+                        "N=", bounds$N_Final,
+                        " | 剔除", bounds$Removed_Percent,
+                        "% | 异常", round(outlier_stats$异常比例, 1),
+                        "% | 范围:", round(q1, 2), "-", round(q99, 2)
+                    ),
+                    x = if (is_bottom_row) var else "",
+                    y = if (is_left_column) "密度" else ""
+                )
+
+            return(p)
+        })
+
+        # 创建图例
+        legend_plot <- ggplot() +
+            geom_density(
+                data = data.frame(x = 1),
+                aes(x = x, fill = "原始数据"),
+                alpha = 0.3
+            ) +
+            geom_density(
+                data = data.frame(x = 1),
+                aes(x = x, fill = "清洗后数据"),
+                alpha = 0.3
+            ) +
+            geom_vline(
+                xintercept = 1,
+                color = "red",
+                linetype = "dashed",
+                aes(linetype = "诊断界限")
+            ) +
+            geom_vline(
+                xintercept = 1,
+                color = "blue",
+                aes(color = "均值")
+            ) +
+            scale_fill_manual(
+                name = "数据分布",
+                values = c(
+                    "原始数据" = "lightblue",
+                    "清洗后数据" = "lightgreen"
+                )
+            ) +
+            scale_color_manual(
+                name = "参考线",
+                values = c("均值" = "blue")
+            ) +
+            scale_linetype_manual(
+                name = "参考线",
+                values = c("诊断界限" = "dashed")
+            ) +
+            theme_void() +
+            theme(
+                legend.position = "bottom",
+                legend.box = "horizontal",
+                legend.margin = margin(0, 0, 0, 0),
+                legend.spacing.x = unit(1, "mm")
+            )
+
+        # 提取图例并转换为grob对象
+        legend <- cowplot::get_legend(legend_plot)
+        legend_grob <- ggplotGrob(legend_plot)$grobs[[which(sapply(ggplotGrob(legend_plot)$grobs, function(x) x$name) == "guide-box")]]
+
+        # 组合图形和图例
+        grid_plot <- arrangeGrob(
+            grobs = current_plots,
+            ncol = 3,
+            top = textGrob(
+                paste(var, "分布 (页", page, "/", n_pages, ")"),
+                gp = gpar(fontsize = 12, fontface = "bold")
+            ),
+            bottom = legend_grob
+        )
+
+        # 保存图集
+        ggsave(
+            filename = file.path(
+                plot_dir,
+                var,
+                paste0(var, "_distributions_page", page, ".png")
+            ),
+            plot = grid_plot,
+            width = 12,
+            height = 13, # 稍微增加高度以容纳图例
+            dpi = 300
+        )
+    }
+}
+```
+
+# 讨论与建议
+
+## 题目级诊断标准的特点
+
+1. **精细化诊断**：
+   - 考虑了不同题目的特点
+   - 可以更准确地识别异常值
+
+2. **实践价值**：
+   - 有助于识别特定题目中的异常表现
+   - 可用于题目难度分析和质量控制
+
+## 应用建议
+
+1. **结合使用**：
+   - 建议与个体级诊断标准结合使用
+   - 可用于深入分析异常数据的成因
+
+2. **注意事项**：
+   - 样本量较小时需谨慎使用
+   - 考虑题目特征对标准的影响
+
+## 未来改进方向
+
+1. **方法优化**：
+   - 考虑题目难度对标准的影响
+   - 探索更灵活的标准设定方法
+
+2. **验证研究**：
+   - 进行跨样本验证
+   - 评估题目级标准的稳定性 
