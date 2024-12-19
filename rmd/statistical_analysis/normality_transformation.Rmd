@@ -1,0 +1,307 @@
+---
+title: "眼动指标数据转换分析：寻找最优正态化方法"
+author: "xc"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    number_sections: true
+    theme: united
+    highlight: tango
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+    echo = TRUE,
+    warning = FALSE,
+    message = FALSE,
+    fig.width = 12,
+    fig.height = 6
+)
+```
+
+# 简介
+
+本文档尝试对个体水平的5个眼动指标进行数据转换，目标是：
+1. 尝试不同的数据转换方法
+2. 评估转换后的正态性
+3. 为每个指标选择最优的转换方法
+
+# 加载依赖包
+
+```{r}
+library(tidyverse)
+library(moments) # 用于计算偏度和峰度
+library(nortest) # 用于正态性检验
+library(gridExtra) # 用于组合图形
+library(knitr) # 用于生成表格
+library(car) # 提供powerTransform函数
+library(openxlsx) # 用于保存Excel文件
+```
+
+# 数据准备
+
+```{r}
+# 读取原始数据
+dt_original <- read_csv("data/demo/metrics/combined_question_metrics.csv")
+
+# 定义数据有效性检验函数
+validate_metrics <- function(data) {
+    data %>% mutate(
+        valid_fixation_count = fixation_count >= 1,
+        valid_fixation_duration =
+            mean_fixation_duration >= 50 &
+                mean_fixation_duration <= 2000,
+        valid_saccade_amplitude =
+            mean_saccade_amplitude <= 500,
+        valid_saccade_angle =
+            !is.na(mean_saccade_angle),
+        valid_pupil_change_rate =
+            abs(mean_pupil_change_rate) <= 0.2
+    )
+}
+
+# 进行有效性检验
+dt_valid <- dt_original %>%
+    group_by(Id, QuestionsNum) %>%
+    validate_metrics() %>%
+    ungroup()
+
+# 定义分析变量
+variables <- c(
+    "fixation_count", "mean_fixation_duration",
+    "mean_saccade_amplitude", "mean_saccade_angle",
+    "mean_pupil_change_rate"
+)
+
+# 计算个体平均值
+subject_means <- dt_valid %>%
+    group_by(Id) %>%
+    summarise(across(
+        all_of(variables),
+        ~ {
+            valid_col <- paste0("valid_", gsub("mean_", "", cur_column()))
+            mean(.x[get(valid_col)], na.rm = TRUE)
+        }
+    )) %>%
+    ungroup()
+```
+
+# 数据转换分析
+
+## 转换函数定义
+
+```{r}
+# 定义常用的转换函数
+transformations <- list(
+    "原始数据" = function(x) x,
+    "对数转换" = function(x) log(x - min(x, na.rm = TRUE) + 1),
+    "平方根转换" = function(x) sqrt(x - min(x, na.rm = TRUE)),
+    "Box-Cox转换" = function(x) {
+        if (min(x, na.rm = TRUE) <= 0) x <- x - min(x, na.rm = TRUE) + 1
+        bc <- powerTransform(x)
+        bcPower(x, bc$lambda)
+    },
+    "倒数转换" = function(x) {
+        if (min(x, na.rm = TRUE) <= 0) x <- x - min(x, na.rm = TRUE) + 1
+        1 / x
+    }
+)
+```
+
+## 转换效果评估
+
+```{r}
+# 评估转换效果的函数
+evaluate_normality <- function(data, transformation_name, transformation_fn) {
+    transformed_data <- transformation_fn(data)
+
+    # 对数据进行随机抽样（如果样本量大于4500）
+    sample_size <- 4500
+    if (length(na.omit(transformed_data)) > sample_size) {
+        sampled_data <- sample(transformed_data, size = sample_size)
+    } else {
+        sampled_data <- transformed_data
+    }
+
+    # Shapiro-Wilk检验（使用抽样数据）
+    sw_test <- shapiro.test(sampled_data)
+
+    # 偏度和峰度使用原始转换后的完整数据
+    skew <- skewness(transformed_data, na.rm = TRUE)
+    kurt <- kurtosis(transformed_data, na.rm = TRUE)
+
+    # 返回评估��果
+    data.frame(
+        Transformation = transformation_name,
+        Shapiro_W = sw_test$statistic,
+        Shapiro_p = sw_test$p.value,
+        Skewness = skew,
+        Kurtosis = kurt,
+        Sample_Size = length(sampled_data) # 添加样本量信息
+    )
+}
+
+# 首先创建结果目录
+result_dir <- "data/results/normality_transformation"
+table_dir <- file.path(result_dir, "tables")
+plot_dir <- file.path(result_dir, "plots")
+
+# 创建目录
+dir.create(table_dir, showWarnings = FALSE, recursive = TRUE)
+dir.create(plot_dir, showWarnings = FALSE, recursive = TRUE)
+
+# 然后进行转换评估
+results_list <- list()
+plots_list <- list()
+
+for (var in variables) {
+    cat("\n分析变量:", var, "\n")
+
+    # 获取原始数据
+    original_data <- subject_means[[var]]
+
+    # 评估所有转换方法
+    results <- map_df(names(transformations), function(trans_name) {
+        evaluate_normality(original_data, trans_name, transformations[[trans_name]])
+    })
+
+    results_list[[var]] <- results
+
+    # 创建可视化对比
+    plot_data <- map_df(names(transformations), function(trans_name) {
+        transformed_values <- transformations[[trans_name]](original_data)
+        data.frame(
+            Transformation = trans_name,
+            Value = transformed_values
+        )
+    })
+
+    # QQ图和密度图对比
+    p <- ggplot(plot_data, aes(sample = Value)) +
+        facet_wrap(~Transformation, scales = "free") +
+        stat_qq() +
+        stat_qq_line(color = "red") +
+        theme_minimal() +
+        labs(title = paste(var, "的不同转换方法QQ图对比"))
+
+    plots_list[[var]] <- p
+
+    # 保存图形
+    ggsave(
+        filename = file.path(plot_dir, paste0(var, "_transformations.png")),
+        plot = p,
+        width = 12,
+        height = 8,
+        dpi = 300
+    )
+}
+```
+
+## 结果展示
+
+```{r}
+# 展示每个变量的转换结果
+for (var in variables) {
+    cat("\n", var, "的转换结果：\n")
+    print(kable(results_list[[var]],
+        digits = 4,
+        col.names = c("转换方法", "Shapiro-W统计量", "P值", "偏度", "峰度", "样本量"),
+        caption = paste(var, "的不同转换方法比较")
+    ))
+    cat("\n")
+}
+```
+
+# 最优转换方法建议
+
+```{r}
+# 为每个变量选择最优转换方法
+select_best_transformation <- function(results) {
+    # 根据以下标准选择最优转换：
+    # 1. Shapiro-Wilk检验p值最大（越接近正态分布）
+    # 2. 偏度和峰度接近0
+
+    results %>%
+        mutate(
+            normality_score = Shapiro_p * (1 / (abs(Skewness) + 1)) * (1 / (abs(Kurtosis - 3) + 1))
+        ) %>%
+        arrange(desc(normality_score)) %>%
+        slice(1)
+}
+
+best_transformations <- map_df(results_list, select_best_transformation, .id = "Variable")
+
+# 首先查看数据结构
+str(best_transformations)
+
+# 展示最优转换建议
+kable(
+    best_transformations %>%
+        select(Variable, Transformation, Shapiro_W, Shapiro_p, Skewness, Kurtosis),
+    digits = 4,
+    col.names = c("变量", "最优转换方法", "Shapiro-W统计量", "P值", "偏度", "峰度"),
+    caption = "各变量的最优转换方法"
+)
+```
+
+# 讨论与建议
+
+## 转换效果分析
+
+1. **最优转换方法选择**：
+   - 对每个变量的最优转换方法进行说明
+   - 解释为什么这些方法更适合
+
+2. **转换的局限性**：
+   - 讨论数据转换可能带来的问题
+   - 在实际应用中的注意事项
+
+## 实践建议
+
+1. **数据分析建议**：
+   - 何时使用转换后的数据
+   - 如何报告转换后的结果
+
+2. **结果解释注意事项**：
+   - 转换后数据的解释方法
+   - 与原始数据的关系
+
+# 结果保存
+
+```{r}
+# 创建Excel工作簿
+wb <- createWorkbook()
+
+# 保存转换结果（CSV和Excel格式）
+for (var in variables) {
+    # 保存CSV
+    write.csv(results_list[[var]],
+        file.path(table_dir, paste0(var, "_transformation_results.csv")),
+        row.names = FALSE
+    )
+
+    # 添加到Excel
+    addWorksheet(wb, var)
+    writeData(wb, var, results_list[[var]])
+    # 设置列宽
+    setColWidths(wb, var, cols = 1:ncol(results_list[[var]]), widths = "auto")
+}
+
+# 保存最优转换建议
+# CSV格式
+write.csv(best_transformations,
+    file.path(table_dir, "best_transformations.csv"),
+    row.names = FALSE
+)
+
+# Excel格式 - 添加到同一个工作簿
+addWorksheet(wb, "最优转换建议")
+writeData(wb, "最优转换建议", best_transformations)
+setColWidths(wb, "最优转换建议", cols = 1:ncol(best_transformations), widths = "auto")
+
+# 保存Excel文件
+saveWorkbook(wb, file.path(table_dir, "transformation_results.xlsx"), overwrite = TRUE)
+``` 

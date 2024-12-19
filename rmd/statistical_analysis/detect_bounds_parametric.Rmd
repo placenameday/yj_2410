@@ -1,0 +1,391 @@
+---
+title: "基于参数检验的眼动指标异常值检测标准"
+author: "xc"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    number_sections: true
+    theme: united
+    highlight: tango
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+    echo = TRUE,
+    warning = FALSE,
+    message = FALSE,
+    fig.width = 10,
+    fig.height = 6
+)
+```
+
+# 简介
+
+本文档使用参数检验方法（均值±2.5个标准差）建立眼动指标的异常值检测标准。主要步骤：
+1. 对原始数据进行极端值剔除
+2. 计算剔除后数据的均值和标准差
+3. 基于均值±2.5SD设定诊断标准
+
+## 分析指标
+- **注视点指标**
+  - 注视点个数 (fixation_count)
+  - 平均注视时长 (mean_fixation_duration)
+- **眼跳指标**
+  - 平均眼跳幅度 (mean_saccade_amplitude)
+  - 平均眼跳角度 (mean_saccade_angle)
+- **瞳孔指标**
+  - 平均瞳孔变化率 (mean_pupil_change_rate)
+
+# 加载依赖包
+
+```{r}
+library(tidyverse)
+library(stats)
+library(openxlsx)
+```
+
+# 数据处理和分析
+
+## 数据预处理
+
+```{r}
+# 1. 读原始数据
+dt_original <- read_csv("data/demo/metrics/combined_question_metrics.csv")
+
+# 2. 定义数据有效性检验函数
+validate_metrics <- function(data) {
+    data %>% mutate(
+        valid_fixation_count = fixation_count >= 1,
+        valid_fixation_duration =
+            mean_fixation_duration >= 50 &
+                mean_fixation_duration <= 2000,
+        valid_saccade_amplitude =
+            mean_saccade_amplitude <= 500,
+        valid_saccade_angle =
+            !is.na(mean_saccade_angle),
+        valid_pupil_change_rate =
+            abs(mean_pupil_change_rate) <= 0.2
+    )
+}
+
+# 3. 进行有效性检验
+dt_valid <- dt_original %>%
+    group_by(Id, QuestionsNum) %>%
+    validate_metrics() %>%
+    ungroup()
+
+# 4. 定义分析变量
+variables <- c(
+    "fixation_count", "mean_fixation_duration",
+    "mean_saccade_amplitude", "mean_saccade_angle",
+    "mean_pupil_change_rate"
+)
+
+# 5. 计算个体平均值
+subject_means <- dt_valid %>%
+    group_by(Id) %>%
+    summarise(across(
+        all_of(variables),
+        ~ {
+            valid_col <- paste0("valid_", gsub("mean_", "", cur_column()))
+            mean(.x[get(valid_col)], na.rm = TRUE)
+        }
+    )) %>%
+    ungroup()
+```
+
+## 极端值剔除和诊断标准计算
+
+```{r}
+# 1. 保持MAD方法用于极端值剔除
+remove_outliers <- function(x, k = 2.5) {
+    median_x <- median(x, na.rm = TRUE)
+    mad_x <- mad(x, constant = 1.4826, na.rm = TRUE)
+    lower <- median_x - k * mad_x
+    upper <- median_x + k * mad_x
+    x[x < lower | x > upper] <- NA
+    return(x)
+}
+
+# 2. 修改回使用参数方法计算诊断界限
+calculate_bounds <- function(x, var_name) {
+    # 设定最小值限制
+    min_values <- list(
+        fixation_count = 1,
+        mean_fixation_duration = 50
+    )
+
+    # 计算基本统计量（使用参数方法）
+    mean_x <- mean(x, na.rm = TRUE)
+    sd_x <- sd(x, na.rm = TRUE)
+
+    # 计算界限（使用参数方法）
+    lower <- mean_x - 2.5 * sd_x
+    upper <- mean_x + 2.5 * sd_x
+
+    # 应用最小值限制
+    if (var_name %in% names(min_values)) {
+        lower <- max(min_values[[var_name]], lower)
+    }
+
+    # 返回结果
+    data.frame(
+        Variable = var_name,
+        Mean = mean_x,
+        SD = sd_x,
+        Lower_Bound = lower,
+        Upper_Bound = upper
+    )
+}
+
+# 3. 对每个变量进行极端值剔除和诊断标准计算
+diagnostic_bounds_parametric <- map_df(variables, function(var) {
+    # 获取数据
+    data <- subject_means[[var]]
+
+    # 剔除极端值
+    cleaned_data <- remove_outliers(data)
+
+    # 计算诊断标准
+    bounds <- calculate_bounds(cleaned_data, var)
+
+    # 计算样本量信息
+    n_total <- sum(!is.na(data))
+    n_removed <- sum(is.na(cleaned_data)) - sum(is.na(data))
+    n_final <- sum(!is.na(cleaned_data))
+
+    # 添加样本量信息
+    bounds$N_Total <- n_total
+    bounds$N_Removed <- n_removed
+    bounds$N_Final <- n_final
+    bounds$Removed_Percent <- round(n_removed / n_total * 100, 2)
+
+    return(bounds)
+})
+
+# 4. 可视化分布和界限
+for (var in variables) {
+    # 获取原始数据和清洗后的数据
+    original_data <- subject_means[[var]]
+    cleaned_data <- remove_outliers(original_data)
+    bounds <- subset(diagnostic_bounds_parametric, Variable == var)
+
+    # 创建密度图
+    p <- ggplot() +
+        # 原始数据分布
+        geom_density(
+            data = data.frame(x = original_data),
+            aes(x = x, fill = "原始数据"),
+            alpha = 0.3
+        ) +
+        # 清洗后数据分布
+        geom_density(
+            data = data.frame(x = cleaned_data),
+            aes(x = x, fill = "清洗后数据"),
+            alpha = 0.3
+        ) +
+        # 添加界限线
+        geom_vline(
+            xintercept = bounds$Lower_Bound,
+            color = "red",
+            linetype = "dashed"
+        ) +
+        geom_vline(
+            xintercept = bounds$Upper_Bound,
+            color = "red",
+            linetype = "dashed"
+        ) +
+        geom_vline(
+            xintercept = bounds$Mean,
+            color = "blue"
+        ) +
+        scale_fill_manual(values = c(
+            "原始数据" = "lightblue",
+            "清洗后数据" = "lightgreen"
+        )) +
+        theme_minimal() +
+        labs(
+            title = paste(var, "的分布和诊断界限"),
+            subtitle = paste0(
+                "清洗后样本量: ", bounds$N_Final,
+                " (剔除 ", bounds$Removed_Percent, "%)"
+            ),
+            x = var,
+            y = "密度",
+            fill = "数据类型"
+        )
+
+    print(p)
+}
+```
+
+## 异常值分析
+
+```{r}
+# 使用诊断标准进行异常值分析
+outlier_analysis_parametric <- map_df(variables, function(var) {
+    # 获取数据和界限
+    data <- subject_means[[var]]
+    bounds <- subset(diagnostic_bounds_parametric, Variable == var)
+
+    # 计算异常值数量
+    n_total <- sum(!is.na(data))
+    n_outliers <- sum(data < bounds$Lower_Bound | data > bounds$Upper_Bound, na.rm = TRUE)
+    n_normal <- n_total - n_outliers
+
+    data.frame(
+        指标 = var,
+        正常个体数 = n_normal,
+        异常个体数 = n_outliers,
+        总个体数 = n_total,
+        正常个体比例 = round(n_normal / n_total * 100, 1),
+        异常个体比例 = round(n_outliers / n_total * 100, 1)
+    )
+})
+
+# 打印结果表格
+knitr::kable(outlier_analysis_parametric,
+    align = c("l", "r", "r", "r", "r", "r")
+)
+```
+
+# 结果保存
+
+```{r}
+# 创建结果目录
+result_dir <- "data/results/detect_bounds_parametric"
+table_dir <- file.path(result_dir, "tables")
+plot_dir <- file.path(result_dir, "plots")
+
+# 创建目录
+dir.create(table_dir, showWarnings = FALSE, recursive = TRUE)
+dir.create(plot_dir, showWarnings = FALSE, recursive = TRUE)
+
+# 创建Excel工作簿
+wb <- createWorkbook()
+
+# 1. 保存诊断标准
+# CSV格式
+write.csv(diagnostic_bounds_parametric,
+    file.path(table_dir, "diagnostic_bounds_parametric.csv"),
+    row.names = FALSE
+)
+
+# Excel格式
+addWorksheet(wb, "诊断标准")
+writeData(wb, "诊断标准", diagnostic_bounds_parametric)
+setColWidths(wb, "诊断标准", cols = 1:ncol(diagnostic_bounds_parametric), widths = "auto")
+
+# 2. 保存异常值分析结果
+# CSV格式
+write.csv(outlier_analysis_parametric,
+    file.path(table_dir, "outlier_analysis_parametric.csv"),
+    row.names = FALSE
+)
+
+# Excel格式
+addWorksheet(wb, "异常值分析")
+writeData(wb, "异常值分析", outlier_analysis_parametric)
+setColWidths(wb, "异常值分析", cols = 1:ncol(outlier_analysis_parametric), widths = "auto")
+
+# 保存Excel文件
+saveWorkbook(wb,
+    file.path(table_dir, "parametric_analysis_results.xlsx"),
+    overwrite = TRUE
+)
+
+# 3. 保存分布图
+for (var in variables) {
+    # 获取数据和界限
+    original_data <- subject_means[[var]]
+    cleaned_data <- remove_outliers(original_data)
+    bounds <- subset(diagnostic_bounds_parametric, Variable == var)
+
+    p <- ggplot() +
+        geom_density(
+            data = data.frame(x = original_data),
+            aes(x = x, fill = "原始数据"),
+            alpha = 0.3
+        ) +
+        geom_density(
+            data = data.frame(x = cleaned_data),
+            aes(x = x, fill = "清洗后数据"),
+            alpha = 0.3
+        ) +
+        geom_vline(
+            xintercept = bounds$Lower_Bound,
+            color = "red",
+            linetype = "dashed"
+        ) +
+        geom_vline(
+            xintercept = bounds$Upper_Bound,
+            color = "red",
+            linetype = "dashed"
+        ) +
+        geom_vline(
+            xintercept = bounds$Mean,
+            color = "blue"
+        ) +
+        scale_fill_manual(values = c(
+            "原始数据" = "lightblue",
+            "清洗后数据" = "lightgreen"
+        )) +
+        theme_minimal() +
+        labs(
+            title = paste(var, "的分布和诊断界限"),
+            subtitle = paste0(
+                "清洗后样本量: ", bounds$N_Final,
+                " (剔除 ", bounds$Removed_Percent, "%)"
+            ),
+            x = var,
+            y = "密度",
+            fill = "数据类型"
+        )
+
+    # 保存图片
+    ggsave(
+        filename = file.path(plot_dir, paste0(var, "_distribution_parametric.png")),
+        plot = p,
+        width = 10,
+        height = 6,
+        dpi = 300
+    )
+}
+```
+
+# 讨论与建议
+
+## 参数检验方法的优势
+
+1. **统计效力**：
+   - 参数检验方法通常具有更高的统计效力
+   - 结果更容易解释和理解
+
+2. **实践意义**：
+   - 使用均值±2.5SD作为标准具有良好的理论基础
+   - 在大样本情况下更加稳健
+
+## 注意事项
+
+1. **数据预处理的重要性**：
+   - 初步的极端值剔除有助于获得更稳定的标准
+   - 需要注意记录和报告剔除的数据比例
+
+2. **应用建议**：
+   - 建议将本标准作为主要参考标准
+   - 可以与非参数方法的结果进行对比验证
+   - 在实际应用中需要考虑具体研究情境
+
+## 未来改进方向
+
+1. **方法优化**：
+   - 考虑其他极端值识别方法
+   - 探索更适合特定指标的标准差倍数
+
+2. **验证研究**：
+   - 进行跨样本验证
+   - 评估标准的稳定性和可推广性
+</rewritten_file> 
