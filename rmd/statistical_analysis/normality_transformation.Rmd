@@ -133,7 +133,7 @@ evaluate_normality <- function(data, transformation_name, transformation_fn) {
     skew <- skewness(transformed_data, na.rm = TRUE)
     kurt <- kurtosis(transformed_data, na.rm = TRUE)
 
-    # 返回评估��果
+    # 返回评估结果
     data.frame(
         Transformation = transformation_name,
         Shapiro_W = sw_test$statistic,
@@ -304,4 +304,61 @@ setColWidths(wb, "最优转换建议", cols = 1:ncol(best_transformations), widt
 
 # 保存Excel文件
 saveWorkbook(wb, file.path(table_dir, "transformation_results.xlsx"), overwrite = TRUE)
+```
+
+## Box-Cox转换后的分布图
+
+```{r}
+# 创建Box-Cox转换后的分布图
+create_distribution_plot <- function(data, variable) {
+    # 应用Box-Cox转换
+    transformed_data <- transformations[["Box-Cox转换"]](data[[variable]])
+
+    # 创建数据框
+    plot_data <- data.frame(
+        Original = data[[variable]],
+        Transformed = transformed_data
+    )
+
+    # 创建原始数据和转换后数据的对比图
+    p1 <- ggplot(plot_data, aes(x = Original)) +
+        geom_density(fill = "lightblue", alpha = 0.5) +
+        theme_minimal() +
+        labs(
+            title = paste(variable, "原始分布"),
+            x = "原始值",
+            y = "密度"
+        )
+
+    p2 <- ggplot(plot_data, aes(x = Transformed)) +
+        geom_density(fill = "lightgreen", alpha = 0.5) +
+        theme_minimal() +
+        labs(
+            title = paste(variable, "Box-Cox转换后分布"),
+            x = "转换后值",
+            y = "密度"
+        )
+
+    # 组合图形
+    combined_plot <- grid.arrange(p1, p2, ncol = 2)
+
+    # 保存图形
+    ggsave(
+        filename = file.path(plot_dir, paste0(variable, "_boxcox_distribution.png")),
+        plot = combined_plot,
+        width = 12,
+        height = 6,
+        dpi = 300
+    )
+
+    return(combined_plot)
+}
+
+# 为每个变量创建并显示分布图
+distribution_plots <- list()
+for (var in variables) {
+    cat("\n创建", var, "的分布图\n")
+    distribution_plots[[var]] <- create_distribution_plot(subject_means, var)
+}
 ``` 
+
